@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use prost::Message;
 use rusqlite::Connection;
 
+use crate::audit::{self, AuditLog, AuditRecord};
 use crate::db;
 use crate::error::{CoreError, Result};
 use crate::proto::event::Kind as EventKind;
@@ -79,6 +80,8 @@ pub struct Runtime {
     next_seq: AtomicU64,
     next_pty_id: AtomicU64,
     ptys: Mutex<std::collections::HashMap<u64, Arc<PtyHandle>>>,
+    audit: AuditLog,
+    pub pty_wall_clock_timeout: Duration,
 }
 
 impl Drop for Runtime {
@@ -87,6 +90,22 @@ impl Drop for Runtime {
             let handles: Vec<_> = ptys.drain().map(|(_, h)| h).collect();
             drop(ptys);
             for handle in handles {
+                let (sid, pgid) = handle
+                    .meta
+                    .lock()
+                    .map(|m| (m.id, handle.session.pgid))
+                    .unwrap_or((handle.session.id, handle.session.pgid));
+                let _ = self.audit.append(&AuditRecord {
+                    ts: audit::now_iso8601(),
+                    actor: "supervisor".into(),
+                    op: "supervisor_kill".into(),
+                    resolved_paths: vec![format!("pgid:{pgid}")],
+                    before_hash: None,
+                    after_hash: Some("runtime_drop".into()),
+                    policy_result: "ALLOW".into(),
+                    approval_id: None,
+                    session_id: Some(sid.to_string()),
+                });
                 handle.stop.store(true, Ordering::SeqCst);
                 let _ = pty::close(&handle.session);
                 if let Ok(mut join) = handle.join.lock() {
@@ -115,6 +134,12 @@ impl Runtime {
         let db = db::open(&db_path)?;
         let next_seq = db::max_event_seq(&db)? + 1;
         let next_pty_id = db::max_terminal_session_id(&db)?.saturating_add(1).max(1);
+        let audit = AuditLog::new(
+            app_data_dir
+                .join("internal")
+                .join("audit")
+                .join("audit.jsonl"),
+        );
         let runtime = Self {
             app_data_dir,
             native_lib_dir,
@@ -126,6 +151,8 @@ impl Runtime {
             next_seq: AtomicU64::new(next_seq),
             next_pty_id: AtomicU64::new(next_pty_id),
             ptys: Mutex::new(std::collections::HashMap::new()),
+            audit,
+            pty_wall_clock_timeout: Duration::from_secs(30 * 60),
         };
         runtime.emit_restore_available_sessions()?;
         runtime.emit_event_kind(EventKind::Log(LogEvent {
@@ -303,12 +330,30 @@ impl Runtime {
         let runtime_ptr = self as *const Runtime as usize;
         let stop = Arc::clone(&handle.stop);
         let reader_handle = Arc::clone(&handle);
+        let wall_clock_timeout = self.pty_wall_clock_timeout;
         let join = std::thread::spawn(move || {
             let runtime = unsafe { &*(runtime_ptr as *const Runtime) };
             let mut last_emit = std::time::Instant::now();
+            let started = std::time::Instant::now();
             let mut pending = Vec::<u8>::new();
             let mut dropped_bytes: usize = 0;
             while !stop.load(Ordering::SeqCst) {
+                if started.elapsed() >= wall_clock_timeout {
+                    let _ = runtime.audit.append(&AuditRecord {
+                        ts: audit::now_iso8601(),
+                        actor: "supervisor".into(),
+                        op: "wall_clock_timeout".into(),
+                        resolved_paths: vec![],
+                        before_hash: None,
+                        after_hash: None,
+                        policy_result: "DENY".into(),
+                        approval_id: None,
+                        session_id: Some(id.to_string()),
+                    });
+                    let _ = pty::signal(&reader_handle.session, 15);
+                    std::thread::sleep(Duration::from_secs(2));
+                    let _ = pty::signal(&reader_handle.session, 9);
+                }
                 match pty::read_available(&reader_handle.session) {
                     Ok(bytes) if !bytes.is_empty() => {
                         if pending.len() + bytes.len() > TERMINAL_OUTPUT_COALESCE_BYTES * 4 {
@@ -435,6 +480,18 @@ impl Runtime {
             ptys.remove(&pty_id)
                 .ok_or_else(|| CoreError::NotFound(format!("pty not found: {pty_id}")))?
         };
+        let pgid = handle.session.pgid;
+        let _ = self.audit.append(&AuditRecord {
+            ts: audit::now_iso8601(),
+            actor: "supervisor".into(),
+            op: "supervisor_kill".into(),
+            resolved_paths: vec![format!("pgid:{pgid}")],
+            before_hash: None,
+            after_hash: Some("close".into()),
+            policy_result: "ALLOW".into(),
+            approval_id: None,
+            session_id: Some(pty_id.to_string()),
+        });
         self.close_handle(
             handle,
             crate::proto::TerminalSessionState::TerminalSessionStopped,
@@ -501,12 +558,38 @@ impl Runtime {
     pub fn pty_stop_all(&self) -> Result<u32> {
         let handles: Vec<_> = {
             let mut ptys = self.ptys.lock().map_err(lock_error)?;
-            let vals = ptys.drain().map(|(_, h)| h).collect::<Vec<_>>();
-            vals
+            ptys.drain().map(|(_, h)| h).collect::<Vec<_>>()
         };
         let mut stopped = 0u32;
         for handle in handles {
-            let code = handle.meta.lock().ok().and_then(|m| m.exit_code);
+            let (code, sid, pgid) = if let Ok(meta) = handle.meta.lock() {
+                (
+                    if meta.exit_code.unwrap_or(0) != 0 {
+                        meta.exit_code
+                    } else {
+                        Some(-1)
+                    },
+                    meta.id,
+                    handle.session.pgid,
+                )
+            } else {
+                (Some(-1), handle.session.id, handle.session.pgid)
+            };
+            let _ = self.audit.append(&AuditRecord {
+                ts: audit::now_iso8601(),
+                actor: "supervisor".into(),
+                op: "supervisor_kill".into(),
+                resolved_paths: vec![format!("pgid:{pgid}")],
+                before_hash: None,
+                after_hash: Some("stop_all".into()),
+                policy_result: "ALLOW".into(),
+                approval_id: None,
+                session_id: Some(sid.to_string()),
+            });
+            let _ = handle
+                .meta
+                .lock()
+                .map(|mut m| m.state = crate::proto::TerminalSessionState::TerminalSessionStopped);
             if self
                 .close_handle(
                     handle,
@@ -796,6 +879,109 @@ impl Runtime {
                     crate::proto::StopAllTerminalSessionsResponse { stopped },
                 ))
             }
+            Some(RequestKind::EvaluateCommand(request)) => {
+                let a = crate::policy::evaluate_command(
+                    &request.command,
+                    request.actor_is_agent,
+                    &request.session_id,
+                    &request.cwd,
+                );
+                let decision = match a.decision {
+                    crate::policy::PolicyDecision::Allow => "ALLOW",
+                    crate::policy::PolicyDecision::Confirm => "CONFIRM",
+                    crate::policy::PolicyDecision::Deny => "DENY",
+                };
+                let _ = self.audit.append(&AuditRecord {
+                    ts: audit::now_iso8601(),
+                    actor: if request.actor_is_agent {
+                        "agent".into()
+                    } else {
+                        "user".into()
+                    },
+                    op: "policy_decision".into(),
+                    resolved_paths: vec![request.cwd.clone()],
+                    before_hash: None,
+                    after_hash: Some(a.command_hash.clone()),
+                    policy_result: decision.into(),
+                    approval_id: None,
+                    session_id: Some(request.session_id.clone()),
+                });
+                Ok(ResponseKind::EvaluateCommand(
+                    crate::proto::EvaluateCommandResponse {
+                        decision: decision.to_string(),
+                        reason: a.reason,
+                        normalized_command: a.normalized_command,
+                        argv: a.argv,
+                        command_hash: a.command_hash,
+                        file_count_estimate: a.file_count_estimate,
+                        affects_outside_project: a.affects_outside_project,
+                        uses_network: a.uses_network,
+                        creates_checkpoint: a.creates_checkpoint,
+                    },
+                ))
+            }
+            Some(RequestKind::IssueApprovalToken(request)) => {
+                let token = crate::policy::issue_approval_token(
+                    &request.command_hash,
+                    &request.session_id,
+                )?;
+                let _ = self.audit.append(&AuditRecord {
+                    ts: audit::now_iso8601(),
+                    actor: "ui".into(),
+                    op: "approval_issued".into(),
+                    resolved_paths: vec![],
+                    before_hash: None,
+                    after_hash: Some(request.command_hash.clone()),
+                    policy_result: "CONFIRM".into(),
+                    approval_id: Some(audit::redact(&token)),
+                    session_id: Some(request.session_id.clone()),
+                });
+                Ok(ResponseKind::IssueApprovalToken(
+                    crate::proto::IssueApprovalTokenResponse {
+                        token,
+                        expires_in_seconds: 60,
+                    },
+                ))
+            }
+            Some(RequestKind::ConsumeApprovalToken(request)) => {
+                let res = crate::policy::consume_approval_token(
+                    &request.token,
+                    &request.command_hash,
+                    &request.session_id,
+                );
+                match res {
+                    Ok(()) => {
+                        let _ = self.audit.append(&AuditRecord {
+                            ts: audit::now_iso8601(),
+                            actor: "ui".into(),
+                            op: "approval_consumed".into(),
+                            resolved_paths: vec![],
+                            before_hash: None,
+                            after_hash: Some(request.command_hash.clone()),
+                            policy_result: "ALLOW".into(),
+                            approval_id: Some(audit::redact(&request.token)),
+                            session_id: Some(request.session_id.clone()),
+                        });
+                        Ok(ResponseKind::ConsumeApprovalToken(
+                            crate::proto::ConsumeApprovalTokenResponse { ok: true },
+                        ))
+                    }
+                    Err(e) => {
+                        let _ = self.audit.append(&AuditRecord {
+                            ts: audit::now_iso8601(),
+                            actor: "ui".into(),
+                            op: "approval_denied".into(),
+                            resolved_paths: vec![],
+                            before_hash: None,
+                            after_hash: Some(request.command_hash.clone()),
+                            policy_result: "DENY".into(),
+                            approval_id: Some(audit::redact(&request.token)),
+                            session_id: Some(request.session_id.clone()),
+                        });
+                        Err(e)
+                    }
+                }
+            }
             None => Err(CoreError::InvalidArgument("missing request kind".into())),
         }
     }
@@ -871,9 +1057,14 @@ impl Runtime {
         let project_dir = self.project_dir(&request.project_id)?;
         let target = vfs::resolve_for_write(&project_dir, &relative)?;
         let existed = target.exists();
+        let before_hash = if existed {
+            Some(hash_bytes(&fs::read(&target)?))
+        } else {
+            None
+        };
         fs::write(&target, &request.content)?;
         let size = fs::metadata(&target)?.len();
-
+        let after_hash = Some(hash_bytes(&request.content));
         {
             let db = self.db.lock().map_err(lock_error)?;
             db::upsert_file_index(&db, &request.project_id, &request.path, size, now_millis())?;
@@ -883,6 +1074,17 @@ impl Runtime {
             &request.path,
             if existed { "modified" } else { "created" },
         )?;
+        let _ = self.audit.append(&AuditRecord {
+            ts: audit::now_iso8601(),
+            actor: "system".into(),
+            op: "write_file".into(),
+            resolved_paths: vec![path_string(&target)],
+            before_hash,
+            after_hash,
+            policy_result: "ALLOW".into(),
+            approval_id: None,
+            session_id: None,
+        });
         Ok(WriteFileResponse {
             path: request.path,
             size,
@@ -964,6 +1166,7 @@ impl Runtime {
                 request.expected_mtime_millis, current_mtime
             )));
         }
+        let before_hash = Some(hash_bytes(&fs::read(&target)?));
         fs::write(&target, &request.content)?;
         let new_meta = fs::metadata(&target)?;
         let size = new_meta.len();
@@ -973,11 +1176,23 @@ impl Runtime {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
+        let after_hash = Some(hash_bytes(&request.content));
         {
             let db = self.db.lock().map_err(lock_error)?;
             db::upsert_file_index(&db, &request.project_id, &request.path, size, now_millis())?;
         }
         self.emit_file_event(&request.project_id, &request.path, "modified")?;
+        let _ = self.audit.append(&AuditRecord {
+            ts: audit::now_iso8601(),
+            actor: "system".into(),
+            op: "write_file_if_unchanged".into(),
+            resolved_paths: vec![path_string(&target)],
+            before_hash,
+            after_hash,
+            policy_result: "ALLOW".into(),
+            approval_id: None,
+            session_id: None,
+        });
         Ok(WriteFileIfUnchangedResponse {
             path: request.path,
             size,
@@ -1093,6 +1308,17 @@ impl Runtime {
             )?;
         }
         self.emit_file_event(&request.project_id, &request.new_path, "renamed")?;
+        let _ = self.audit.append(&AuditRecord {
+            ts: audit::now_iso8601(),
+            actor: "system".into(),
+            op: "rename_file".into(),
+            resolved_paths: vec![path_string(&old_target), path_string(&new_target)],
+            before_hash: None,
+            after_hash: None,
+            policy_result: "ALLOW".into(),
+            approval_id: None,
+            session_id: None,
+        });
         Ok(RenameFileResponse {
             old_path: request.old_path,
             new_path: request.new_path,
@@ -1113,6 +1339,11 @@ impl Runtime {
         if metadata.file_type().is_symlink() {
             return Err(CoreError::PathEscape("symlink rejected".into()));
         }
+        let before_hash = if metadata.is_file() {
+            fs::read(&target).ok().map(|b| hash_bytes(&b))
+        } else {
+            None
+        };
         if metadata.is_dir() {
             let mut entries = fs::read_dir(&target)?;
             if entries.next().is_some() && !request.recursive {
@@ -1129,6 +1360,17 @@ impl Runtime {
             db::delete_file_index_prefix(&db, &request.project_id, &request.path)?;
         }
         self.emit_file_event(&request.project_id, &request.path, "deleted")?;
+        let _ = self.audit.append(&AuditRecord {
+            ts: audit::now_iso8601(),
+            actor: "system".into(),
+            op: "delete_path".into(),
+            resolved_paths: vec![path_string(&target)],
+            before_hash,
+            after_hash: None,
+            policy_result: "ALLOW".into(),
+            approval_id: None,
+            session_id: None,
+        });
         Ok(DeletePathResponse { path: request.path })
     }
 
@@ -1334,6 +1576,16 @@ fn now_millis() -> i64 {
         .as_millis() as i64
 }
 
+fn hash_bytes(bytes: &[u8]) -> String {
+    // Simple FNV-1a 64-bit hex for M8 audit before/after hashes (not cryptographic).
+    let mut h: u64 = 14695981039346656037;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    format!("{h:016x}")
+}
+
 fn is_text_heuristic(path: &Path, size: u64) -> Result<bool> {
     if size == 0 {
         return Ok(true);
@@ -1410,6 +1662,14 @@ impl PtyMeta {
 
 #[cfg(test)]
 mod tests {
+    fn read_audit_lines(rt: &Runtime) -> Vec<String> {
+        let path = rt.app_data_dir.join("internal/audit/audit.jsonl");
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(|s| s.to_string())
+            .collect()
+    }
     use super::*;
 
     fn request(id: u32, kind: RequestKind) -> Vec<u8> {
@@ -1977,5 +2237,133 @@ mod tests {
             has_drop,
             "expected drop notice when sink/coalesce buffer overflows"
         );
+    }
+
+    #[test]
+    fn policy_decision_and_approval_audit_records() {
+        let (_temp, runtime) = setup_runtime();
+        let req = Request {
+            id: 1,
+            kind: Some(RequestKind::EvaluateCommand(
+                crate::proto::EvaluateCommandRequest {
+                    command: "rm -rf /tmp/x".into(),
+                    actor_is_agent: false,
+                    session_id: "s1".into(),
+                    cwd: "/p".into(),
+                },
+            )),
+        };
+        let bytes = runtime.call(&req.encode_to_vec());
+        let resp = Response::decode(bytes.as_slice()).unwrap();
+        assert_eq!(resp.status, Status::Ok as i32);
+        let issue = Request {
+            id: 2,
+            kind: Some(RequestKind::IssueApprovalToken(
+                crate::proto::IssueApprovalTokenRequest {
+                    command_hash: "abc".into(),
+                    session_id: "s1".into(),
+                },
+            )),
+        };
+        let iresp = Response::decode(runtime.call(&issue.encode_to_vec()).as_slice()).unwrap();
+        let token = match iresp.kind {
+            Some(ResponseKind::IssueApprovalToken(r)) => r.token,
+            _ => panic!("bad"),
+        };
+        let consume = Request {
+            id: 3,
+            kind: Some(RequestKind::ConsumeApprovalToken(
+                crate::proto::ConsumeApprovalTokenRequest {
+                    token: token.clone(),
+                    command_hash: "abc".into(),
+                    session_id: "s1".into(),
+                },
+            )),
+        };
+        let cresp = Response::decode(runtime.call(&consume.encode_to_vec()).as_slice()).unwrap();
+        assert_eq!(cresp.status, Status::Ok as i32);
+        let lines = read_audit_lines(&runtime).join("\n");
+        assert!(lines.contains("\"op\":\"policy_decision\""));
+        assert!(lines.contains("\"op\":\"approval_issued\""));
+        assert!(lines.contains("\"op\":\"approval_consumed\""));
+        assert!(
+            !lines.contains(&token),
+            "raw token must be redacted in audit"
+        );
+    }
+
+    #[test]
+    fn approval_denied_audit_record_on_bad_consume() {
+        let (_temp, runtime) = setup_runtime();
+        let req = Request {
+            id: 1,
+            kind: Some(RequestKind::ConsumeApprovalToken(
+                crate::proto::ConsumeApprovalTokenRequest {
+                    token: "aptok_bad_1".into(),
+                    command_hash: "abc".into(),
+                    session_id: "s1".into(),
+                },
+            )),
+        };
+        let resp = Response::decode(runtime.call(&req.encode_to_vec()).as_slice()).unwrap();
+        assert_eq!(resp.status, Status::Error as i32);
+        let lines = read_audit_lines(&runtime).join("\n");
+        assert!(lines.contains("\"op\":\"approval_denied\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_close_kills_forked_child_process_group() {
+        let (_temp, runtime) = setup_runtime();
+        let id = runtime.pty_open(None, None, vec![], 80, 24, 6).unwrap();
+        runtime.pty_write(id, b"sleep 300 &\nwait\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let pgid = runtime.ptys.lock().unwrap().get(&id).unwrap().session.pgid;
+        runtime.pty_close(id).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let rc = unsafe { libc::kill(-pgid, 0) };
+        assert_ne!(rc, 0, "process group should be dead");
+        let lines = read_audit_lines(&runtime).join("\n");
+        assert!(lines.contains("\"op\":\"supervisor_kill\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_stop_all_kills_all_sessions_no_zombies() {
+        let (_temp, runtime) = setup_runtime();
+        let mut pgids = vec![];
+        for _ in 0..3 {
+            let id = runtime.pty_open(None, None, vec![], 80, 24, 6).unwrap();
+            runtime.pty_write(id, b"sleep 300 &\nwait\n").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            pgids.push(runtime.ptys.lock().unwrap().get(&id).unwrap().session.pgid);
+        }
+        let stopped = runtime.pty_stop_all().unwrap();
+        assert_eq!(stopped, 3);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        for pgid in pgids {
+            let rc = unsafe { libc::kill(-pgid, 0) };
+            assert_ne!(rc, 0, "pgid {pgid} should be dead");
+        }
+        let lines = read_audit_lines(&runtime).join("\n");
+        assert!(lines.matches("\"op\":\"supervisor_kill\"").count() >= 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_drop_kills_sessions() {
+        let (temp, runtime) = setup_runtime();
+        let app = temp.path().to_path_buf();
+        let id = runtime.pty_open(None, None, vec![], 80, 24, 6).unwrap();
+        runtime.pty_write(id, b"sleep 300 &\nwait\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let pgid = runtime.ptys.lock().unwrap().get(&id).unwrap().session.pgid;
+        drop(runtime);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let rc = unsafe { libc::kill(-pgid, 0) };
+        assert_ne!(rc, 0, "pgid should be dead after runtime drop");
+        let audit_path = app.join("internal/audit/audit.jsonl");
+        let lines = std::fs::read_to_string(audit_path).unwrap_or_default();
+        assert!(lines.contains("runtime_drop"));
     }
 }

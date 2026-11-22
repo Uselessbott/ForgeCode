@@ -51,6 +51,8 @@ fun TerminalPanel(
     onCloseSession: (Long) -> Unit,
     onRecreate: (Long) -> Unit,
     onDismissRestore: () -> Unit,
+    onApproveApproval: () -> Unit = {},
+    onDenyApproval: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val focusRequester = remember { FocusRequester() }
@@ -192,6 +194,22 @@ fun TerminalPanel(
             text = { Text("This sends stop to all running terminal sessions.") },
             confirmButton = { TextButton(onClick = { confirmStopAll = false; onStopAll() }) { Text("Stop All") } },
             dismissButton = { TextButton(onClick = { confirmStopAll = false }) { Text("Cancel") } },
+        )
+    }
+    state.pendingApproval?.let { p ->
+        AlertDialog(
+            onDismissRequest = onDenyApproval,
+            title = { Text("Confirm command") },
+            text = {
+                Column {
+                    Text(p.reason)
+                    Text("Command: ${p.command}", style = MaterialTheme.typography.bodySmall)
+                    Text("cwd: ${p.cwd}", style = MaterialTheme.typography.bodySmall)
+                    Text("Affects outside project: ${p.affectsOutsideProject}; network: ${p.usesNetwork}; checkpoint before execution: ${p.createsCheckpoint}", style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = onApproveApproval) { Text("Approve once") } },
+            dismissButton = { TextButton(onClick = onDenyApproval) { Text("Deny") } },
         )
     }
 }

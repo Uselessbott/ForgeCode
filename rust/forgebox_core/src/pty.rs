@@ -367,3 +367,39 @@ mod tests {
         assert!(spawn(&cfg).is_err());
     }
 }
+
+#[test]
+fn close_kills_process_group_including_forked_child() {
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let shell = PathBuf::from("/system/bin/sh");
+        let shell = if shell.exists() {
+            shell
+        } else {
+            PathBuf::from("/bin/sh")
+        };
+        let cfg = PtyConfig {
+            shell_path: shell,
+            cwd: dir.path().to_path_buf(),
+            env: vec![],
+            cols: 80,
+            rows: 24,
+        };
+        let session = spawn(&cfg).unwrap();
+        // spawn background child in same process group
+        let cmd = b"sleep 300 & echo $!\n";
+        write(&session, cmd).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let pgid = session.pgid;
+        close(&session).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let alive = unsafe { libc::kill(-pgid, 0) };
+        if alive == 0 {
+            // best effort cleanup
+            unsafe { libc::kill(-pgid, libc::SIGKILL) };
+            panic!("process group still alive after close");
+        }
+    }
+}

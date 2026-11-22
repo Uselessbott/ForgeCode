@@ -139,8 +139,68 @@ object TerminalSessionController {
         }
     }
 
-    fun write(text: String) { val id = _state.value.activePtyId ?: return; scope.launch { runCatching { backend.ptyWrite(id, text.toByteArray(Charsets.UTF_8)) } } }
+    fun write(text: String) {
+        val id = _state.value.activePtyId ?: return
+        scope.launch {
+            if (text.contains("\n") || text.contains("\r")) {
+                val cmd = text.trim()
+                if (cmd.isNotEmpty()) {
+                    val cwd = activeSession()?.cwd ?: ""
+                    val resp = runCatching {
+                        backend.call(
+                            ForgeProto.Request.newBuilder()
+                                .setEvaluateCommand(
+                                    ForgeProto.EvaluateCommandRequest.newBuilder()
+                                        .setCommand(cmd).setActorIsAgent(false).setSessionId(id.toString()).setCwd(cwd).build()
+                                ).build()
+                        )
+                    }.getOrNull()
+                    if (resp != null && resp.status == ForgeProto.Status.OK && resp.hasEvaluateCommand()) {
+                        val ev = resp.evaluateCommand
+                        when (ev.decision) {
+                            "DENY" -> { _state.value = _state.value.copy(status = "Blocked: ${ev.reason}"); return@launch }
+                            "CONFIRM" -> {
+                                _state.value = _state.value.copy(pendingApproval = TerminalPendingApproval(
+                                    command = ev.normalizedCommand.ifBlank { cmd }, reason = ev.reason, commandHash = ev.commandHash,
+                                    sessionId = id.toString(), cwd = cwd, fileCountEstimate = ev.fileCountEstimate,
+                                    affectsOutsideProject = ev.affectsOutsideProject, usesNetwork = ev.usesNetwork, createsCheckpoint = ev.createsCheckpoint,
+                                ))
+                                return@launch
+                            }
+                        }
+                    }
+                }
+            }
+            runCatching { backend.ptyWrite(id, text.toByteArray(Charsets.UTF_8)) }
+        }
+    }
     fun writeBytes(bytes: ByteArray) { val id = _state.value.activePtyId ?: return; scope.launch { runCatching { backend.ptyWrite(id, bytes) } } }
+
+    fun approvePending() {
+        val p = _state.value.pendingApproval ?: return
+        val ptyId = p.sessionId.toLongOrNull() ?: return
+        scope.launch {
+            val issue = runCatching {
+                backend.call(ForgeProto.Request.newBuilder().setIssueApprovalToken(
+                    ForgeProto.IssueApprovalTokenRequest.newBuilder().setCommandHash(p.commandHash).setSessionId(p.sessionId).build()
+                ).build())
+            }.getOrNull()
+            if (issue == null || issue.status != ForgeProto.Status.OK || !issue.hasIssueApprovalToken()) {
+                _state.value = _state.value.copy(status = "Approval token issuance failed", pendingApproval = null); return@launch
+            }
+            val consume = runCatching {
+                backend.call(ForgeProto.Request.newBuilder().setConsumeApprovalToken(
+                    ForgeProto.ConsumeApprovalTokenRequest.newBuilder().setToken(issue.issueApprovalToken.token).setCommandHash(p.commandHash).setSessionId(p.sessionId).build()
+                ).build())
+            }.getOrNull()
+            if (consume == null || consume.status != ForgeProto.Status.OK) {
+                _state.value = _state.value.copy(status = "Approval token consume failed", pendingApproval = null); return@launch
+            }
+            _state.value = _state.value.copy(pendingApproval = null, status = "Approved: ${p.command}")
+            runCatching { backend.ptyWrite(ptyId, (p.command + "\n").toByteArray(Charsets.UTF_8)) }
+        }
+    }
+    fun denyPending() { _state.value = _state.value.copy(pendingApproval = null, status = "Command cancelled") }
     fun resize(cols: Int, rows: Int) { val id = _state.value.activePtyId ?: return; scope.launch { runCatching { backend.ptyResize(id, cols, rows) } } }
     fun signal(sig: Int) { val id = _state.value.activePtyId ?: return; scope.launch { runCatching { backend.ptySignal(id, sig) } } }
     fun stop() { signal(15) }

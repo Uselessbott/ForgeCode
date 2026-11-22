@@ -10,9 +10,12 @@ pub mod proto {
 pub mod error;
 pub mod vfs;
 
+mod audit;
 mod db;
+mod policy;
 mod pty;
 mod runtime;
+mod seccomp;
 mod terminal;
 
 pub use runtime::{Runtime, CORE_VERSION};

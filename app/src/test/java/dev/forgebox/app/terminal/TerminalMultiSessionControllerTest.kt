@@ -1,4 +1,4 @@
-﻿package dev.forgebox.app.terminal
+package dev.forgebox.app.terminal
 
 import dev.forgebox.proto.ForgeProto
 import kotlinx.coroutines.CoroutineScope
@@ -32,6 +32,15 @@ class TerminalMultiSessionControllerTest {
             pollEvents = emptyList()
             return out
         }
+        val writes = mutableListOf<Pair<Long, ByteArray>>()
+        val evalCalls = mutableListOf<ForgeProto.EvaluateCommandRequest>()
+        val issueTokenCalls = mutableListOf<ForgeProto.IssueApprovalTokenRequest>()
+        val consumeTokenCalls = mutableListOf<ForgeProto.ConsumeApprovalTokenRequest>()
+        var evalResponse: ForgeProto.EvaluateCommandResponse? = null
+        var issueTokenResponse: ForgeProto.IssueApprovalTokenResponse? = null
+        var consumeOk: Boolean = true
+        var consumeError: String? = null
+
         override fun call(request: ForgeProto.Request): ForgeProto.Response {
             return when {
                 request.hasListTerminalSessions() -> ForgeProto.Response.newBuilder().setStatus(ForgeProto.Status.OK)
@@ -48,6 +57,21 @@ class TerminalMultiSessionControllerTest {
                     sessions = LinkedHashMap(sessions.mapValues { (_, v) -> v.toBuilder().setState(ForgeProto.TerminalSessionState.TERMINAL_SESSION_STOPPED).setRestorable(true).build() })
                     ForgeProto.Response.newBuilder().setStatus(ForgeProto.Status.OK).setStopAllTerminalSessions(ForgeProto.StopAllTerminalSessionsResponse.newBuilder().setStopped(sessions.size).build()).build()
                 }
+                request.hasEvaluateCommand() -> {
+                    evalCalls += request.evaluateCommand
+                    val ev = evalResponse ?: ForgeProto.EvaluateCommandResponse.newBuilder().setDecision("ALLOW").setReason("ok").setNormalizedCommand(request.evaluateCommand.command).setCommandHash("h").build()
+                    ForgeProto.Response.newBuilder().setStatus(ForgeProto.Status.OK).setEvaluateCommand(ev).build()
+                }
+                request.hasIssueApprovalToken() -> {
+                    issueTokenCalls += request.issueApprovalToken
+                    val resp = issueTokenResponse ?: ForgeProto.IssueApprovalTokenResponse.newBuilder().setToken("tok").setExpiresInSeconds(60).build()
+                    ForgeProto.Response.newBuilder().setStatus(ForgeProto.Status.OK).setIssueApprovalToken(resp).build()
+                }
+                request.hasConsumeApprovalToken() -> {
+                    consumeTokenCalls += request.consumeApprovalToken
+                    if (consumeOk) ForgeProto.Response.newBuilder().setStatus(ForgeProto.Status.OK).setConsumeApprovalToken(ForgeProto.ConsumeApprovalTokenResponse.newBuilder().setOk(true).build()).build()
+                    else ForgeProto.Response.newBuilder().setStatus(ForgeProto.Status.ERROR).setError(ForgeProto.Error.newBuilder().setCode("DENY").setMessage(consumeError ?: "expired").build()).build()
+                }
                 else -> ForgeProto.Response.newBuilder().setStatus(ForgeProto.Status.ERROR).build()
             }
         }
@@ -62,7 +86,7 @@ class TerminalMultiSessionControllerTest {
             sessions[id] = desc
             return id
         }
-        override fun ptyWrite(ptyId: Long, data: ByteArray) {}
+        override fun ptyWrite(ptyId: Long, data: ByteArray) { writes += ptyId to data }
         override fun ptyResize(ptyId: Long, cols: Int, rows: Int) {}
         override fun ptySignal(ptyId: Long, signal: Int) {}
         override fun ptyClose(ptyId: Long) { closeCalls += ptyId; sessions[ptyId]?.let { sessions[ptyId] = it.toBuilder().setState(ForgeProto.TerminalSessionState.TERMINAL_SESSION_STOPPED).build() } }
@@ -212,4 +236,89 @@ class TerminalMultiSessionControllerTest {
         assertTrue(fb.pollTimeouts.isNotEmpty())
         assertTrue(fb.pollTimeouts.all { it == 250 })
     } finally { TerminalSessionController.stopPollingForTests() } }
+
+    @Test fun c1_confirmCommandTriggersPendingApprovalWithDetails() = runTest { try {
+        val fb = setup(this)
+        fb.sessions[1] = session(1, "s1", ForgeProto.TerminalSessionState.TERMINAL_SESSION_RUNNING)
+        TerminalSessionController.openForTests("p", startPolling = false); advanceUntilIdle()
+        fb.evalResponse = ForgeProto.EvaluateCommandResponse.newBuilder()
+            .setDecision("CONFIRM").setReason("Recursive delete requires confirmation")
+            .setNormalizedCommand("rm -rf Projects/x").setCommandHash("h1").setFileCountEstimate(100)
+            .setAffectsOutsideProject(false).setUsesNetwork(false).setCreatesCheckpoint(false).build()
+        TerminalSessionController.write("rm -rf Projects/x\n"); advanceUntilIdle()
+        val p = TerminalSessionController.state.value.pendingApproval
+        assertNotNull(p)
+        assertEquals("rm -rf Projects/x", p!!.command)
+        assertEquals("Recursive delete requires confirmation", p.reason)
+        assertEquals("1", p.sessionId)
+        assertFalse(p.affectsOutsideProject)
+        assertFalse(p.usesNetwork)
+        assertFalse(p.createsCheckpoint)
+        assertTrue(fb.writes.isEmpty())
+    } finally { TerminalSessionController.stopPollingForTests() } }
+
+    @Test fun c2_approveOnceIssuesTokenConsumesAndWritesExactCommand() = runTest { try {
+        val fb = setup(this)
+        fb.sessions[1] = session(1, "s1", ForgeProto.TerminalSessionState.TERMINAL_SESSION_RUNNING)
+        TerminalSessionController.openForTests("p", startPolling = false); advanceUntilIdle()
+        fb.evalResponse = ForgeProto.EvaluateCommandResponse.newBuilder().setDecision("CONFIRM").setReason("r").setNormalizedCommand("rm -rf Projects/x").setCommandHash("h1").build()
+        fb.issueTokenResponse = ForgeProto.IssueApprovalTokenResponse.newBuilder().setToken("tok1").setExpiresInSeconds(60).build()
+        TerminalSessionController.write("rm -rf Projects/x\n"); advanceUntilIdle()
+        TerminalSessionController.approvePending(); advanceUntilIdle()
+        assertEquals(1, fb.issueTokenCalls.size)
+        assertEquals(1, fb.consumeTokenCalls.size)
+        assertEquals("tok1", fb.consumeTokenCalls[0].token)
+        assertEquals("rm -rf Projects/x\n", fb.writes.last().second.toString(Charsets.UTF_8))
+        assertNull(TerminalSessionController.state.value.pendingApproval)
+    } finally { TerminalSessionController.stopPollingForTests() } }
+
+    @Test fun c3_denyDoesNotIssueTokenOrWrite() = runTest { try {
+        val fb = setup(this)
+        fb.sessions[1] = session(1, "s1", ForgeProto.TerminalSessionState.TERMINAL_SESSION_RUNNING)
+        TerminalSessionController.openForTests("p", startPolling = false); advanceUntilIdle()
+        fb.evalResponse = ForgeProto.EvaluateCommandResponse.newBuilder().setDecision("CONFIRM").setReason("r").setNormalizedCommand("rm -rf x").setCommandHash("h1").build()
+        TerminalSessionController.write("rm -rf x\n"); advanceUntilIdle()
+        TerminalSessionController.denyPending(); advanceUntilIdle()
+        assertTrue(fb.issueTokenCalls.isEmpty())
+        assertTrue(fb.consumeTokenCalls.isEmpty())
+        assertTrue(fb.writes.none { it.second.toString(Charsets.UTF_8).contains("rm -rf x") })
+        assertNull(TerminalSessionController.state.value.pendingApproval)
+    } finally { TerminalSessionController.stopPollingForTests() } }
+
+    @Test fun c4_denyClassificationShowsReasonNoApprove() = runTest { try {
+        val fb = setup(this)
+        fb.sessions[1] = session(1, "s1", ForgeProto.TerminalSessionState.TERMINAL_SESSION_RUNNING)
+        TerminalSessionController.openForTests("p", startPolling = false); advanceUntilIdle()
+        fb.evalResponse = ForgeProto.EvaluateCommandResponse.newBuilder().setDecision("DENY").setReason("blocked").setNormalizedCommand("bad").setCommandHash("h1").build()
+        TerminalSessionController.write("bad\n"); advanceUntilIdle()
+        assertNull(TerminalSessionController.state.value.pendingApproval)
+        assertTrue(TerminalSessionController.state.value.status.contains("Blocked"))
+        assertTrue(fb.writes.isEmpty())
+    } finally { TerminalSessionController.stopPollingForTests() } }
+
+    @Test fun c5_approveAfterTtlErrorNoPtyWrite() = runTest { try {
+        val fb = setup(this)
+        fb.sessions[1] = session(1, "s1", ForgeProto.TerminalSessionState.TERMINAL_SESSION_RUNNING)
+        TerminalSessionController.openForTests("p", startPolling = false); advanceUntilIdle()
+        fb.evalResponse = ForgeProto.EvaluateCommandResponse.newBuilder().setDecision("CONFIRM").setReason("r").setNormalizedCommand("rm -rf x").setCommandHash("h1").build()
+        fb.issueTokenResponse = ForgeProto.IssueApprovalTokenResponse.newBuilder().setToken("tok1").setExpiresInSeconds(60).build()
+        TerminalSessionController.write("rm -rf x\n"); advanceUntilIdle()
+        fb.consumeOk = false; fb.consumeError = "expired"
+        TerminalSessionController.approvePending(); advanceUntilIdle()
+        assertTrue(fb.writes.none { it.second.toString(Charsets.UTF_8).contains("rm -rf x") })
+        assertTrue(TerminalSessionController.state.value.status.contains("failed", true) || TerminalSessionController.state.value.status.contains("expired", true))
+    } finally { TerminalSessionController.stopPollingForTests() } }
+
+    @Test fun c6_agentCannotSelfApproveViaTokenInCommand() = runTest { try {
+        val fb = setup(this)
+        fb.sessions[1] = session(1, "s1", ForgeProto.TerminalSessionState.TERMINAL_SESSION_RUNNING)
+        TerminalSessionController.openForTests("p", startPolling = false); advanceUntilIdle()
+        fb.evalResponse = ForgeProto.EvaluateCommandResponse.newBuilder().setDecision("CONFIRM").setReason("agent escape").setNormalizedCommand("rm -rf x aptok_fake_1").setCommandHash("h1").build()
+        TerminalSessionController.write("rm -rf x aptok_fake_1\n"); advanceUntilIdle()
+        assertNotNull(TerminalSessionController.state.value.pendingApproval)
+        assertTrue(fb.writes.isEmpty())
+        // No auto-consume; only UI approvePending path issues/consumes tokens.
+        assertTrue(fb.consumeTokenCalls.isEmpty())
+    } finally { TerminalSessionController.stopPollingForTests() } }
 }
+

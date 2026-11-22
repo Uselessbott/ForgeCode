@@ -31,6 +31,18 @@ data class TerminalSessionUi(
     val envOverridesJson: String = "{}",
 )
 
+data class TerminalPendingApproval(
+    val command: String,
+    val reason: String,
+    val commandHash: String,
+    val sessionId: String,
+    val cwd: String,
+    val fileCountEstimate: Int = 0,
+    val affectsOutsideProject: Boolean = false,
+    val usesNetwork: Boolean = false,
+    val createsCheckpoint: Boolean = false,
+)
+
 data class TerminalUiState(
     val open: Boolean = false,
     val projectId: String? = null,
@@ -40,4 +52,5 @@ data class TerminalUiState(
     val status: String = "stopped",
     val hintShown: Boolean = false,
     val restoreBanner: String? = null,
+    val pendingApproval: TerminalPendingApproval? = null,
 )

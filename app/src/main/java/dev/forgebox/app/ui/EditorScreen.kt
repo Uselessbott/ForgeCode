@@ -167,6 +167,8 @@ fun EditorScreen(
                     onCloseSession = TerminalSessionController::closeSession,
                     onRecreate = TerminalSessionController::recreateRestorable,
                     onDismissRestore = TerminalSessionController::dismissRestoreBanner,
+                    onApproveApproval = TerminalSessionController::approvePending,
+                    onDenyApproval = TerminalSessionController::denyPending,
                     modifier = Modifier.fillMaxWidth().weight(terminalFraction),
                 )
             }

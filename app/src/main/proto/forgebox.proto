@@ -28,6 +28,9 @@ message Request {
     ListTerminalSessionsRequest list_terminal_sessions = 15;
     RenameTerminalSessionRequest rename_terminal_session = 16;
     StopAllTerminalSessionsRequest stop_all_terminal_sessions = 17;
+    EvaluateCommandRequest evaluate_command = 18;
+    IssueApprovalTokenRequest issue_approval_token = 19;
+    ConsumeApprovalTokenRequest consume_approval_token = 20;
   }
 }
 
@@ -52,6 +55,9 @@ message Response {
     ListTerminalSessionsResponse list_terminal_sessions = 17;
     RenameTerminalSessionResponse rename_terminal_session = 18;
     StopAllTerminalSessionsResponse stop_all_terminal_sessions = 19;
+    EvaluateCommandResponse evaluate_command = 20;
+    IssueApprovalTokenResponse issue_approval_token = 21;
+    ConsumeApprovalTokenResponse consume_approval_token = 22;
   }
 }
 
@@ -292,3 +298,20 @@ message RenameTerminalSessionRequest { uint64 pty_id = 1; string name = 2; }
 message RenameTerminalSessionResponse { TerminalSessionDescriptor session = 1; }
 message StopAllTerminalSessionsRequest {}
 message StopAllTerminalSessionsResponse { uint32 stopped = 1; }
+
+message EvaluateCommandRequest { string command = 1; bool actor_is_agent = 2; string session_id = 3; string cwd = 4; }
+message EvaluateCommandResponse {
+  string decision = 1; // ALLOW|CONFIRM|DENY
+  string reason = 2;
+  string normalized_command = 3;
+  repeated string argv = 4;
+  string command_hash = 5;
+  uint32 file_count_estimate = 6;
+  bool affects_outside_project = 7;
+  bool uses_network = 8;
+  bool creates_checkpoint = 9;
+}
+message IssueApprovalTokenRequest { string command_hash = 1; string session_id = 2; }
+message IssueApprovalTokenResponse { string token = 1; int64 expires_in_seconds = 2; }
+message ConsumeApprovalTokenRequest { string token = 1; string command_hash = 2; string session_id = 3; }
+message ConsumeApprovalTokenResponse { bool ok = 1; }
