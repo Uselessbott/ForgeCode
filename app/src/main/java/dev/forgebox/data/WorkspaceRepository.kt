@@ -70,6 +70,43 @@ class WorkspaceRepository(
         response.readFile.content.toByteArray()
     }
 
+    fun statFile(projectId: String, path: String): Result<FileStatModel> = runCatching {
+        val response = call(
+            ForgeProto.Request.newBuilder().setStatFile(
+                ForgeProto.StatFileRequest.newBuilder()
+                    .setProjectId(projectId)
+                    .setPath(path),
+            ),
+        )
+        val s = response.statFile
+        FileStatModel(path = s.path, size = s.size, mtimeMillis = s.mtimeMillis, isTextHeuristic = s.isTextHeuristic)
+    }
+
+    fun getInfo(): Result<ForgeProto.GetInfoResponse> = runCatching {
+        val response = call(
+            ForgeProto.Request.newBuilder().setGetInfo(ForgeProto.GetInfoRequest.getDefaultInstance()),
+        )
+        response.getInfo
+    }
+
+    fun writeFileIfUnchanged(
+        projectId: String,
+        path: String,
+        content: ByteArray,
+        expectedMtimeMillis: Long,
+    ): Result<Long> = runCatching {
+        val response = call(
+            ForgeProto.Request.newBuilder().setWriteFileIfUnchanged(
+                ForgeProto.WriteFileIfUnchangedRequest.newBuilder()
+                    .setProjectId(projectId)
+                    .setPath(path)
+                    .setContent(com.google.protobuf.ByteString.copyFrom(content))
+                    .setExpectedMtimeMillis(expectedMtimeMillis),
+            ),
+        )
+        response.writeFileIfUnchanged.mtimeMillis
+    }
+
     fun createFile(projectId: String, relPath: String, content: ByteArray = ByteArray(0)): Result<Unit> =
         runCatching {
             call(

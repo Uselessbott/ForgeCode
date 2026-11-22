@@ -58,6 +58,7 @@ fun ForgeBoxApp() {
         }
 
         val repository = remember { WorkspaceRepository(ForgeBoxRuntime) }
+        var openFilePath by rememberSaveable { mutableStateOf<String?>(null) }
         val projectId = selectedProjectId
         if (projectId == null) {
             val vm: ProjectListViewModel = viewModel(factory = ProjectListViewModel.factory(repository))
@@ -66,12 +67,21 @@ fun ForgeBoxApp() {
                 coreStatus = coreStatus,
                 onOpenProject = { selectedProjectId = it },
             )
+        } else if (openFilePath != null) {
+            val vm: EditorViewModel = viewModel(factory = EditorViewModel.factory(repository))
+            EditorScreen(
+                projectId = projectId,
+                initialPath = openFilePath!!,
+                viewModel = vm,
+                onBack = { openFilePath = null },
+            )
         } else {
             val vm: ProjectExplorerViewModel = viewModel(factory = ProjectExplorerViewModel.factory(repository))
             ProjectExplorerScreen(
                 projectId = projectId,
                 viewModel = vm,
                 onBack = { selectedProjectId = null },
+                onOpenFile = { openFilePath = it },
             )
         }
     }

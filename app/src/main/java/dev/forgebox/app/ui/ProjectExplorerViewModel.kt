@@ -78,7 +78,7 @@ class ProjectExplorerViewModel(
                     if (bytes.size <= 64_000 && printable == text.length) {
                         _state.value.copy(previewText = text, previewError = null)
                     } else {
-                        _state.value.copy(previewText = null, previewError = "Preview not available in M4")
+                        _state.value.copy(previewText = null, previewError = "Not editable/previewable in M5")
                     }
                 },
                 onFailure = { _state.value.copy(previewText = null, previewError = it.message ?: "Failed to read file") },

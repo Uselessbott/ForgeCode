@@ -19,11 +19,13 @@ use crate::proto::{
     Event, FileChangedEvent, FileEntry, GetInfoRequest, GetInfoResponse, ListFilesRequest,
     ListFilesResponse, ListProjectsRequest, ListProjectsResponse, LogEvent, Project,
     ReadFileRequest, ReadFileResponse, RenameFileRequest, RenameFileResponse, RenameProjectRequest,
-    RenameProjectResponse, Request, Response, Status, WriteFileRequest, WriteFileResponse,
+    RenameProjectResponse, Request, Response, StatFileRequest, StatFileResponse, Status,
+    WriteFileIfUnchangedRequest, WriteFileIfUnchangedResponse, WriteFileRequest, WriteFileResponse,
 };
 use crate::vfs;
 
-pub const CORE_VERSION: &str = "0.3.0-m4";
+pub const CORE_VERSION: &str = "0.4.0-m5";
+pub const MAX_EDITABLE_FILE_BYTES: u64 = 1024 * 1024; // 1 MiB for M5 editor guard
 
 const WORKSPACE_DIRS: &[&str] = &[
     "Projects",
@@ -155,6 +157,12 @@ impl Runtime {
             Some(RequestKind::RenameProject(request)) => self
                 .rename_project(request)
                 .map(ResponseKind::RenameProject),
+            Some(RequestKind::StatFile(request)) => {
+                self.stat_file(request).map(ResponseKind::StatFile)
+            }
+            Some(RequestKind::WriteFileIfUnchanged(request)) => self
+                .write_file_if_unchanged(request)
+                .map(ResponseKind::WriteFileIfUnchanged),
             None => Err(CoreError::InvalidArgument("missing request kind".into())),
         }
     }
@@ -168,6 +176,7 @@ impl Runtime {
             database_path: path_string(&self.db_path),
             project_count,
             native_library_dir: path_string(&self.native_lib_dir),
+            max_editable_file_bytes: MAX_EDITABLE_FILE_BYTES,
         })
     }
 
@@ -259,6 +268,87 @@ impl Runtime {
         }
         Ok(ReadFileResponse {
             content: fs::read(target)?,
+        })
+    }
+
+    fn stat_file(&self, request: StatFileRequest) -> Result<StatFileResponse> {
+        self.assert_project_exists(&request.project_id)?;
+        let relative = vfs::validate_relative_path(&request.path, false)?;
+        let project_dir = self.project_dir(&request.project_id)?;
+        let target = vfs::resolve(&project_dir, &relative, true)?;
+        let metadata = fs::symlink_metadata(&target)?;
+        if metadata.file_type().is_symlink() {
+            return Err(CoreError::PathEscape("symlink rejected".into()));
+        }
+        if !metadata.is_file() {
+            return Err(CoreError::InvalidArgument(
+                "path is not a regular file".into(),
+            ));
+        }
+        let size = metadata.len();
+        let mtime_millis = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let is_text_heuristic = is_text_heuristic(&target, size)?;
+        Ok(StatFileResponse {
+            path: request.path,
+            size,
+            mtime_millis,
+            is_text_heuristic,
+            exists: true,
+        })
+    }
+
+    fn write_file_if_unchanged(
+        &self,
+        request: WriteFileIfUnchangedRequest,
+    ) -> Result<WriteFileIfUnchangedResponse> {
+        self.assert_project_exists(&request.project_id)?;
+        let relative = vfs::validate_relative_path(&request.path, false)?;
+        let project_dir = self.project_dir(&request.project_id)?;
+        let target = vfs::resolve(&project_dir, &relative, true)?;
+        let metadata = fs::symlink_metadata(&target)?;
+        if metadata.file_type().is_symlink() {
+            return Err(CoreError::PathEscape("symlink rejected".into()));
+        }
+        if !metadata.is_file() {
+            return Err(CoreError::InvalidArgument(
+                "path is not a regular file".into(),
+            ));
+        }
+        let current_mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        if current_mtime != request.expected_mtime_millis {
+            return Err(CoreError::InvalidArgument(format!(
+                "CONFLICT: file changed on disk (expected mtime {}, found {})",
+                request.expected_mtime_millis, current_mtime
+            )));
+        }
+        fs::write(&target, &request.content)?;
+        let new_meta = fs::metadata(&target)?;
+        let size = new_meta.len();
+        let mtime_millis = new_meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        {
+            let db = self.db.lock().map_err(lock_error)?;
+            db::upsert_file_index(&db, &request.project_id, &request.path, size, now_millis())?;
+        }
+        self.emit_file_event(&request.project_id, &request.path, "modified")?;
+        Ok(WriteFileIfUnchangedResponse {
+            path: request.path,
+            size,
+            mtime_millis,
         })
     }
 
@@ -556,6 +646,23 @@ fn now_millis() -> i64 {
         .as_millis() as i64
 }
 
+fn is_text_heuristic(path: &Path, size: u64) -> Result<bool> {
+    if size == 0 {
+        return Ok(true);
+    }
+    let mut file = fs::File::open(path)?;
+    let mut buf = [0u8; 8192];
+    let n = std::io::Read::read(&mut file, &mut buf)?;
+    if n == 0 {
+        return Ok(true);
+    }
+    let sample = &buf[..n];
+    if sample.contains(&0) {
+        return Ok(false);
+    }
+    Ok(std::str::from_utf8(sample).is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,6 +814,90 @@ mod tests {
             },
             1
         );
+    }
+
+    #[test]
+    fn stat_and_write_if_unchanged_enforce_conflicts() {
+        let (_temp, runtime) = setup_runtime();
+        create_project(&runtime, 1, "Proj");
+        let write = response(runtime.call(&request(
+            2,
+            RequestKind::WriteFile(WriteFileRequest {
+                project_id: "Proj".into(),
+                path: "a.txt".into(),
+                content: b"hello".to_vec(),
+            }),
+        )));
+        assert_ok(&write, 2);
+
+        let stat = response(runtime.call(&request(
+            3,
+            RequestKind::StatFile(StatFileRequest {
+                project_id: "Proj".into(),
+                path: "a.txt".into(),
+            }),
+        )));
+        assert_ok(&stat, 3);
+        let stat = match stat.kind.unwrap() {
+            ResponseKind::StatFile(s) => s,
+            _ => panic!("unexpected"),
+        };
+        assert_eq!(stat.size, 5);
+        assert!(stat.is_text_heuristic);
+        assert!(stat.mtime_millis > 0);
+
+        let missing = response(runtime.call(&request(
+            4,
+            RequestKind::StatFile(StatFileRequest {
+                project_id: "Proj".into(),
+                path: "missing.txt".into(),
+            }),
+        )));
+        assert_eq!(missing.status, Status::Error as i32);
+
+        let conflict = response(runtime.call(&request(
+            5,
+            RequestKind::WriteFileIfUnchanged(WriteFileIfUnchangedRequest {
+                project_id: "Proj".into(),
+                path: "a.txt".into(),
+                content: b"new".to_vec(),
+                expected_mtime_millis: stat.mtime_millis - 1,
+            }),
+        )));
+        assert_eq!(conflict.status, Status::Error as i32);
+        let conflict_msg = conflict.error.unwrap().message;
+        assert!(conflict_msg.contains("CONFLICT"));
+
+        let read_back = response(runtime.call(&request(
+            6,
+            RequestKind::ReadFile(ReadFileRequest {
+                project_id: "Proj".into(),
+                path: "a.txt".into(),
+            }),
+        )));
+        assert_ok(&read_back, 6);
+        let content = match read_back.kind.unwrap() {
+            ResponseKind::ReadFile(r) => r.content,
+            _ => panic!("unexpected"),
+        };
+        assert_eq!(content, b"hello");
+
+        let ok_write = response(runtime.call(&request(
+            7,
+            RequestKind::WriteFileIfUnchanged(WriteFileIfUnchangedRequest {
+                project_id: "Proj".into(),
+                path: "a.txt".into(),
+                content: b"updated".to_vec(),
+                expected_mtime_millis: stat.mtime_millis,
+            }),
+        )));
+        assert_ok(&ok_write, 7);
+        let ok_write = match ok_write.kind.unwrap() {
+            ResponseKind::WriteFileIfUnchanged(r) => r,
+            _ => panic!("unexpected"),
+        };
+        assert_eq!(ok_write.size, 7);
+        assert!(ok_write.mtime_millis >= stat.mtime_millis);
     }
 
     #[test]

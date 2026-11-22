@@ -14,3 +14,10 @@ data class FileEntryModel(
     val isDir: Boolean,
     val size: Long,
 )
+
+data class FileStatModel(
+    val path: String,
+    val size: Long,
+    val mtimeMillis: Long,
+    val isTextHeuristic: Boolean,
+)

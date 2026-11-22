@@ -45,6 +45,7 @@ fun ProjectExplorerScreen(
     projectId: String,
     viewModel: ProjectExplorerViewModel,
     onBack: () -> Unit,
+    onOpenFile: (String) -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
     var showCreateFile by remember { mutableStateOf(false) }
@@ -94,7 +95,7 @@ fun ProjectExplorerScreen(
                                 Card(
                                     modifier = Modifier.fillMaxWidth().padding(start = indent)
                                         .combinedClickable(
-                                            onClick = { if (!entry.isDir) viewModel.selectFile(entry.path) },
+                                            onClick = { if (!entry.isDir) onOpenFile(entry.path) },
                                             onLongClick = { actionTarget = entry },
                                         ),
                                 ) {
@@ -147,6 +148,9 @@ fun ProjectExplorerScreen(
                         clipboard.setText(AnnotatedString(entry.path))
                         actionTarget = null
                     }) { Text("Copy path") }
+                    if (!entry.isDir) {
+                        TextButton(onClick = { onOpenFile(entry.path); actionTarget = null }) { Text("Open in editor") }
+                    }
                     TextButton(onClick = { renameTarget = entry; actionTarget = null }) { Text("Rename") }
                     TextButton(onClick = { deleteTarget = entry; actionTarget = null }) {
                         Text("Delete", color = MaterialTheme.colorScheme.error)

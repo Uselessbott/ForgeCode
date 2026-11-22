@@ -23,6 +23,8 @@ message Request {
     CreateFolderRequest create_folder = 10;
     DeleteProjectRequest delete_project = 11;
     RenameProjectRequest rename_project = 12;
+    StatFileRequest stat_file = 13;
+    WriteFileIfUnchangedRequest write_file_if_unchanged = 14;
   }
 }
 
@@ -42,6 +44,8 @@ message Response {
     CreateFolderResponse create_folder = 12;
     DeleteProjectResponse delete_project = 13;
     RenameProjectResponse rename_project = 14;
+    StatFileResponse stat_file = 15;
+    WriteFileIfUnchangedResponse write_file_if_unchanged = 16;
   }
 }
 
@@ -64,6 +68,7 @@ message GetInfoResponse {
   string database_path = 3;
   uint32 project_count = 4;
   string native_library_dir = 5;
+  uint64 max_editable_file_bytes = 6;
 }
 
 message Project {
@@ -170,6 +175,32 @@ message RenameProjectRequest {
 
 message RenameProjectResponse {
   Project project = 1;
+}
+
+message StatFileRequest {
+  string project_id = 1;
+  string path = 2;
+}
+
+message StatFileResponse {
+  string path = 1;
+  uint64 size = 2;
+  int64 mtime_millis = 3;
+  bool is_text_heuristic = 4;
+  bool exists = 5;
+}
+
+message WriteFileIfUnchangedRequest {
+  string project_id = 1;
+  string path = 2;
+  bytes content = 3;
+  int64 expected_mtime_millis = 4;
+}
+
+message WriteFileIfUnchangedResponse {
+  string path = 1;
+  uint64 size = 2;
+  int64 mtime_millis = 3;
 }
 
 // Events are pushed to Kotlin by pollEvents. They are persisted to SQLite as
