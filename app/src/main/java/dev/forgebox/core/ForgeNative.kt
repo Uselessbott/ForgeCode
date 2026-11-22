@@ -1,8 +1,8 @@
 package dev.forgebox.core
 
 /**
- * The single JNI façade. M3 replaces these two handshake methods with the
- * protobuf `call`/`pollEvents` API while keeping this class as the boundary.
+ * Single JNI boundary. All request/response payloads are protobuf bytes defined
+ * in `proto/forgebox.proto`.
  */
 object ForgeNative {
     init {
@@ -10,7 +10,10 @@ object ForgeNative {
     }
 
     external fun nativeVersion(): String
-    external fun nativeEcho(input: String): String
+    external fun nativeInit(appDataDir: String, nativeLibDir: String, dbPath: String): Long
+    external fun nativeCall(handle: Long, request: ByteArray): ByteArray
+    external fun nativePollEvents(handle: Long, max: Int): Array<ByteArray>
+    external fun nativeShutdown(handle: Long)
 
     val version: String
         get() = nativeVersion()

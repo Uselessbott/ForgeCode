@@ -34,6 +34,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -44,10 +45,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.dp
-import dev.forgebox.core.ForgeNative
+import dev.forgebox.core.ForgeBoxRuntime
+import dev.forgebox.proto.ForgeProto
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private enum class Destination(val label: String) {
     FILES("Files"),
@@ -72,6 +77,28 @@ fun ForgeBoxApp() {
     var destination by rememberSaveable { mutableStateOf(Destination.FILES) }
     var activeSession by rememberSaveable { mutableStateOf("main") }
     val sessions = remember { mutableStateListOf("main") }
+    val context = LocalContext.current
+    var coreStatus by remember { mutableStateOf("Core: initializing...") }
+
+    LaunchedEffect(Unit) {
+        coreStatus = withContext(Dispatchers.IO) {
+            runCatching {
+                ForgeBoxRuntime.ensureInitialized(context.applicationContext)
+                val response = ForgeBoxRuntime.call(
+                    ForgeProto.Request.newBuilder()
+                        .setId(1)
+                        .setGetInfo(ForgeProto.GetInfoRequest.getDefaultInstance())
+                        .build(),
+                )
+                if (response.status == ForgeProto.Status.OK && response.hasGetInfo()) {
+                    val info = response.getInfo
+                    "Core ${info.version} · ${info.projectCount} projects"
+                } else {
+                    "Core error: ${response.error.code} ${response.error.message}"
+                }
+            }.getOrElse { "Core init failed: ${it.message}" }
+        }
+    }
 
     MaterialTheme {
         Scaffold(
@@ -81,7 +108,7 @@ fun ForgeBoxApp() {
                         Column {
                             Text("ForgeBox")
                             Text(
-                                text = "Rust core ${ForgeNative.version} · M2 foundation",
+                                text = coreStatus,
                                 style = MaterialTheme.typography.labelSmall,
                             )
                         }
@@ -206,12 +233,11 @@ private fun WorkspaceBar(destination: Destination) {
 
 @Composable
 private fun EditorPlaceholder() {
-    val editorEcho = remember { ForgeNative.nativeEcho("editor") }
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("Code editor", style = MaterialTheme.typography.headlineSmall)
             Text(
-                "sora-editor host attaches in M5. Rust core is live: $editorEcho",
+                "sora-editor host attaches in M5. M3 Rust core provides workspace/storage APIs.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }

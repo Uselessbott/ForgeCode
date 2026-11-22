@@ -1,17 +1,33 @@
-//! ForgeBox Rust core — Milestone 2 JNI handshake.
+//! ForgeBox Rust core — Milestone 3 protobuf façade.
 //!
-//! This is deliberately tiny. M3 replaces the façade with the protobuf runtime
-//! described in docs/ARCHITECTURE.md; the JNI symbol names are kept stable.
+//! Kotlin owns a single `Runtime` handle. Requests and responses are encoded
+//! with the schema in `proto/forgebox.proto`; events are polled separately.
 
-use jni::objects::{JClass, JString};
-use jni::sys::jstring;
+pub mod proto {
+    include!(concat!(env!("OUT_DIR"), "/forgebox.v1.rs"));
+}
+
+pub mod error;
+pub mod vfs;
+
+mod db;
+mod runtime;
+
+pub use runtime::{Runtime, CORE_VERSION};
+
+use jni::objects::{JByteArray, JClass, JObject, JString};
+use jni::sys::{jbyteArray, jint, jlong, jobjectArray, jstring};
 use jni::JNIEnv;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
-pub const CORE_VERSION: &str = "0.1.0-m2";
+fn java_string(env: &mut JNIEnv<'_>, value: jstring) -> jni::errors::Result<String> {
+    let value = unsafe { JString::from_raw(value) };
+    let result = env.get_string(&value)?.into();
+    Ok(result)
+}
 
-/// Pure Rust logic, unit-testable on the host without a JVM.
-pub fn greeting(name: &str) -> String {
-    format!("ForgeBox core {CORE_VERSION} online — hello, {name}!")
+fn throw(env: &mut JNIEnv<'_>, message: &str) {
+    let _ = env.throw_new("java/lang/IllegalStateException", message);
 }
 
 #[no_mangle]
@@ -26,35 +42,128 @@ pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativeVersion(
 }
 
 #[no_mangle]
-pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativeEcho(
+pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativeInit(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
-    input: jstring,
-) -> jstring {
-    let value = unsafe { JString::from_raw(input) };
-    let name: String = match env.get_string(&value) {
-        Ok(value) => value.into(),
-        Err(_) => return std::ptr::null_mut(),
-    };
-    match env.new_string(greeting(&name)) {
-        Ok(value) => value.into_raw(),
-        Err(_) => std::ptr::null_mut(),
+    app_data_dir: jstring,
+    native_lib_dir: jstring,
+    db_path: jstring,
+) -> jlong {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<jlong, String> {
+        let app_data_dir = java_string(&mut env, app_data_dir).map_err(|e| e.to_string())?;
+        let native_lib_dir = java_string(&mut env, native_lib_dir).map_err(|e| e.to_string())?;
+        let db_path = java_string(&mut env, db_path).map_err(|e| e.to_string())?;
+        let runtime = Runtime::new(
+            std::path::PathBuf::from(app_data_dir),
+            std::path::PathBuf::from(native_lib_dir),
+            std::path::PathBuf::from(db_path),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Box::into_raw(Box::new(runtime)) as jlong)
+    }));
+    match result {
+        Ok(Ok(handle)) => handle,
+        Ok(Err(message)) => {
+            throw(&mut env, &message);
+            0
+        }
+        Err(_) => {
+            throw(&mut env, "Rust core panicked during initialization");
+            0
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn greeting_contains_version_and_name() {
-        let message = greeting("Ada");
-        assert!(message.contains(CORE_VERSION));
-        assert!(message.ends_with("hello, Ada!"));
+#[no_mangle]
+pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativeCall(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    request: jbyteArray,
+) -> jbyteArray {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<jbyteArray, String> {
+        if handle == 0 {
+            return Err("runtime is not initialized".into());
+        }
+        let runtime = unsafe { &*(handle as *const Runtime) };
+        let request = unsafe { JByteArray::from_raw(request) };
+        let bytes = env.convert_byte_array(request).map_err(|e| e.to_string())?;
+        let response = runtime.call(&bytes);
+        let array = env
+            .byte_array_from_slice(&response)
+            .map_err(|e| e.to_string())?;
+        Ok(array.into_raw())
+    }));
+    match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(message)) => {
+            throw(&mut env, &message);
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            throw(&mut env, "Rust core panicked during call");
+            std::ptr::null_mut()
+        }
     }
+}
 
-    #[test]
-    fn version_is_stable() {
-        assert_eq!(CORE_VERSION, "0.1.0-m2");
+#[no_mangle]
+pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativePollEvents(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    max: jint,
+) -> jobjectArray {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<jobjectArray, String> {
+        if handle == 0 {
+            return Err("runtime is not initialized".into());
+        }
+        let runtime = unsafe { &*(handle as *const Runtime) };
+        let events = runtime.poll_events(max.max(0) as usize);
+        let byte_array_class = env.find_class("[B").map_err(|e| e.to_string())?;
+        let array = env
+            .new_object_array(
+                events.len() as jni::sys::jsize,
+                byte_array_class,
+                JObject::null(),
+            )
+            .map_err(|e| e.to_string())?;
+        for (index, bytes) in events.iter().enumerate() {
+            let element = env
+                .byte_array_from_slice(bytes)
+                .map_err(|e| e.to_string())?;
+            env.set_object_array_element(&array, index as jni::sys::jsize, &element)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(array.into_raw())
+    }));
+    match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(message)) => {
+            throw(&mut env, &message);
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            throw(&mut env, "Rust core panicked while polling events");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativeShutdown(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let runtime = unsafe { Box::from_raw(handle as *mut Runtime) };
+        drop(runtime);
+    }));
+    if result.is_err() {
+        throw(&mut env, "Rust core panicked during shutdown");
     }
 }
