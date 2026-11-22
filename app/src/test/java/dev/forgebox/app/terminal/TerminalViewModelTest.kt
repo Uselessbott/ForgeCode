@@ -37,4 +37,12 @@ class TerminalControllerLogicTest {
         val state = TerminalDiffParser.parse("not json".toByteArray(), fallback)
         assertEquals(fallback, state)
     }
+
+    @Test
+    fun diffParserReadsScrollbackFields() {
+        val json = """{"rows":2,"cols":5,"cursor":[0,0],"scrollTop":10,"totalLines":12,"lines":["a","b"]}""".toByteArray()
+        val state = TerminalDiffParser.parse(json, TerminalRenderState())
+        assertEquals(10, state.scrollTop)
+        assertEquals(12, state.totalLines)
+    }
 }

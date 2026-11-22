@@ -30,6 +30,16 @@ CREATE TABLE IF NOT EXISTS event_log (
     payload    BLOB NOT NULL,
     created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS terminal_sessions (
+    id           INTEGER PRIMARY KEY,
+    name         TEXT NOT NULL,
+    cwd          TEXT NOT NULL,
+    env_overrides_json TEXT NOT NULL DEFAULT '{}',
+    last_used    INTEGER NOT NULL,
+    was_running  INTEGER NOT NULL DEFAULT 0,
+    exit_code    INTEGER
+);
 ";
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -214,6 +224,107 @@ pub fn insert_event(
     connection.execute(
         "INSERT INTO event_log (seq, kind, payload, created_at) VALUES (?1, ?2, ?3, ?4)",
         params![seq as i64, kind, payload, created_at],
+    )?;
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+pub struct TerminalSessionRow {
+    pub id: u64,
+    pub name: String,
+    pub cwd: String,
+    pub env_overrides_json: String,
+    pub last_used: i64,
+    pub was_running: bool,
+    pub exit_code: Option<i32>,
+}
+
+pub fn upsert_terminal_session(connection: &Connection, row: &TerminalSessionRow) -> Result<()> {
+    connection.execute(
+        "INSERT INTO terminal_sessions (id, name, cwd, env_overrides_json, last_used, was_running, exit_code)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+           name=excluded.name, cwd=excluded.cwd, env_overrides_json=excluded.env_overrides_json,
+           last_used=excluded.last_used, was_running=excluded.was_running, exit_code=excluded.exit_code",
+        params![
+            row.id as i64,
+            row.name,
+            row.cwd,
+            row.env_overrides_json,
+            row.last_used,
+            if row.was_running { 1i64 } else { 0i64 },
+            row.exit_code.map(|v| v as i64),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_terminal_sessions(connection: &Connection) -> Result<Vec<TerminalSessionRow>> {
+    let mut stmt = connection.prepare(
+        "SELECT id, name, cwd, env_overrides_json, last_used, was_running, exit_code
+         FROM terminal_sessions ORDER BY last_used DESC, id DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let was_running: i64 = row.get(5)?;
+        let exit_code: Option<i64> = row.get(6)?;
+        Ok(TerminalSessionRow {
+            id: row.get::<_, i64>(0)? as u64,
+            name: row.get(1)?,
+            cwd: row.get(2)?,
+            env_overrides_json: row.get(3)?,
+            last_used: row.get(4)?,
+            was_running: was_running != 0,
+            exit_code: exit_code.map(|v| v as i32),
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+pub fn mark_terminal_session_running(
+    connection: &Connection,
+    id: u64,
+    was_running: bool,
+    exit_code: Option<i32>,
+    last_used: i64,
+) -> Result<()> {
+    connection.execute(
+        "UPDATE terminal_sessions SET was_running=?2, exit_code=?3, last_used=?4 WHERE id=?1",
+        params![
+            id as i64,
+            if was_running { 1i64 } else { 0i64 },
+            exit_code.map(|v| v as i64),
+            last_used
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn clear_terminal_restore(connection: &Connection, id: u64) -> Result<()> {
+    connection.execute(
+        "UPDATE terminal_sessions SET was_running=0 WHERE id=?1",
+        params![id as i64],
+    )?;
+    Ok(())
+}
+
+pub fn max_terminal_session_id(connection: &Connection) -> Result<u64> {
+    let max: Option<i64> =
+        connection.query_row("SELECT MAX(id) FROM terminal_sessions", [], |row| {
+            row.get(0)
+        })?;
+    Ok(max.unwrap_or(0).max(0) as u64)
+}
+
+pub fn rename_terminal_session(
+    connection: &Connection,
+    id: u64,
+    name: &str,
+    last_used: i64,
+) -> Result<()> {
+    connection.execute(
+        "UPDATE terminal_sessions SET name=?2, last_used=?3 WHERE id=?1",
+        params![id as i64, name, last_used],
     )?;
     Ok(())
 }

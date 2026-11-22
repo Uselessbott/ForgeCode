@@ -44,6 +44,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import dev.forgebox.app.service.SessionService
 import dev.forgebox.app.terminal.TerminalPanel
 import dev.forgebox.app.terminal.TerminalSessionController
+import dev.forgebox.app.terminal.TerminalSessionLifecycle
 import io.github.rosemoe.sora.event.ContentChangeEvent
 import io.github.rosemoe.sora.widget.CodeEditor
 import kotlinx.coroutines.delay
@@ -71,8 +72,9 @@ fun EditorScreen(
     LaunchedEffect(terminalState.open) {
         if (terminalState.open) SessionService.open(context, projectId)
     }
-    LaunchedEffect(terminalState.open, terminalState.ptyId, state.activeIndex) {
-        while (terminalState.open) {
+    val hasRunningTerminal = terminalState.sessions.any { it.lifecycle == TerminalSessionLifecycle.RUNNING || it.lifecycle == TerminalSessionLifecycle.STARTING }
+    LaunchedEffect(terminalState.open, hasRunningTerminal, state.activeIndex) {
+        while (terminalState.open && hasRunningTerminal) {
             viewModel.checkActiveDiskChange()
             delay(2000)
         }
@@ -85,7 +87,7 @@ fun EditorScreen(
                 Text(projectId, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 TextButton(onClick = { showGoTo = true }) { Text("Go to line") }
                 TextButton(onClick = { showFind = true }) { Text("Find") }
-                TextButton(onClick = { TerminalSessionController.toggle(projectId) }) { Text(if (terminalState.open) "Hide Terminal" else "Terminal") }
+                TextButton(onClick = { TerminalSessionController.toggle(context, projectId) }) { Text(if (terminalState.open) "Hide Terminal" else "Terminal") }
                 TextButton(onClick = { viewModel.saveActive() }) { Text("Save") }
             }
 
@@ -154,11 +156,17 @@ fun EditorScreen(
                 ) { HorizontalDivider() }
                 TerminalPanel(
                     state = terminalState,
+                    onCreate = { TerminalSessionController.createSession(projectId) },
+                    onSelect = TerminalSessionController::select,
+                    onRename = TerminalSessionController::rename,
                     onWrite = TerminalSessionController::write,
                     onWriteBytes = TerminalSessionController::writeBytes,
                     onSignal = TerminalSessionController::signal,
                     onStop = TerminalSessionController::stop,
+                    onStopAll = TerminalSessionController::stopAll,
                     onCloseSession = TerminalSessionController::closeSession,
+                    onRecreate = TerminalSessionController::recreateRestorable,
+                    onDismissRestore = TerminalSessionController::dismissRestoreBanner,
                     modifier = Modifier.fillMaxWidth().weight(terminalFraction),
                 )
             }

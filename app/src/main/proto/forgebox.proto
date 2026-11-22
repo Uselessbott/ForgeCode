@@ -25,6 +25,9 @@ message Request {
     RenameProjectRequest rename_project = 12;
     StatFileRequest stat_file = 13;
     WriteFileIfUnchangedRequest write_file_if_unchanged = 14;
+    ListTerminalSessionsRequest list_terminal_sessions = 15;
+    RenameTerminalSessionRequest rename_terminal_session = 16;
+    StopAllTerminalSessionsRequest stop_all_terminal_sessions = 17;
   }
 }
 
@@ -46,6 +49,9 @@ message Response {
     RenameProjectResponse rename_project = 14;
     StatFileResponse stat_file = 15;
     WriteFileIfUnchangedResponse write_file_if_unchanged = 16;
+    ListTerminalSessionsResponse list_terminal_sessions = 17;
+    RenameTerminalSessionResponse rename_terminal_session = 18;
+    StopAllTerminalSessionsResponse stop_all_terminal_sessions = 19;
   }
 }
 
@@ -215,6 +221,10 @@ message Event {
     TerminalExitEvent terminal_exit = 6;
     TerminalTitleEvent terminal_title = 7;
     TerminalCwdEvent terminal_cwd = 8;
+    TerminalSessionSpawnedEvent terminal_session_spawned = 9;
+    TerminalSessionRenamedEvent terminal_session_renamed = 10;
+    TerminalSessionStateEvent terminal_session_state = 11;
+    TerminalSessionRestoreAvailableEvent terminal_session_restore_available = 12;
   }
 }
 
@@ -248,3 +258,37 @@ message TerminalCwdEvent {
   uint64 pty_id = 1;
   string cwd = 2;
 }
+
+enum TerminalSessionState {
+  TERMINAL_SESSION_STATE_UNSPECIFIED = 0;
+  TERMINAL_SESSION_STARTING = 1;
+  TERMINAL_SESSION_RUNNING = 2;
+  TERMINAL_SESSION_EXITED = 3;
+  TERMINAL_SESSION_STOPPED = 4;
+  TERMINAL_SESSION_CRASHED = 5;
+}
+
+message TerminalSessionDescriptor {
+  uint64 pty_id = 1;
+  string name = 2;
+  string cwd = 3;
+  TerminalSessionState state = 4;
+  int32 exit_code = 5;
+  int64 created_at = 6;
+  int64 last_used = 7;
+  bool restorable = 8;
+  bool previous_process_ended = 9;
+  string env_overrides_json = 10;
+}
+
+message TerminalSessionSpawnedEvent { TerminalSessionDescriptor session = 1; }
+message TerminalSessionRenamedEvent { uint64 pty_id = 1; string name = 2; }
+message TerminalSessionStateEvent { uint64 pty_id = 1; TerminalSessionState state = 2; int32 exit_code = 3; }
+message TerminalSessionRestoreAvailableEvent { TerminalSessionDescriptor session = 1; }
+
+message ListTerminalSessionsRequest {}
+message ListTerminalSessionsResponse { repeated TerminalSessionDescriptor sessions = 1; uint32 session_cap = 2; }
+message RenameTerminalSessionRequest { uint64 pty_id = 1; string name = 2; }
+message RenameTerminalSessionResponse { TerminalSessionDescriptor session = 1; }
+message StopAllTerminalSessionsRequest {}
+message StopAllTerminalSessionsResponse { uint32 stopped = 1; }

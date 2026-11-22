@@ -12,14 +12,26 @@ object TerminalDiffParser {
         val cursor = intArrayField(text, "cursor")
         val cursorRow = (cursor.getOrNull(0) ?: 0).coerceIn(0, rows - 1)
         val cursorCol = (cursor.getOrNull(1) ?: 0).coerceIn(0, cols - 1)
+        val scrollTop = intField(text, "scrollTop") ?: fallback.scrollTop
+        val totalLines = intField(text, "totalLines") ?: fallback.totalLines
+        val fg = intField(text, "fg") ?: fallback.fg
+        val bg = intField(text, "bg") ?: fallback.bg
+        val bold = boolField(text, "bold") ?: fallback.bold
+        val underline = boolField(text, "underline") ?: fallback.underline
+        val inverse = boolField(text, "inverse") ?: fallback.inverse
         val parsedLines = stringArrayField(text, "lines")
         val lines = List(rows) { i -> parsedLines.getOrNull(i) ?: "" }
-        TerminalRenderState(rows = rows, cols = cols, lines = lines, cursorRow = cursorRow, cursorCol = cursorCol)
+        TerminalRenderState(rows = rows, cols = cols, lines = lines, cursorRow = cursorRow, cursorCol = cursorCol, scrollTop = scrollTop, totalLines = totalLines, fg = fg, bg = bg, bold = bold, underline = underline, inverse = inverse)
     }.getOrElse { fallback }
 
     private fun intField(text: String, name: String): Int? {
         val m = Regex("\"$name\"\\s*:\\s*(-?\\d+)").find(text) ?: return null
-        return m.groupValues[1].toIntOrNull()
+        return m.groupValues[1].toLongOrNull()?.toInt()
+    }
+
+    private fun boolField(text: String, name: String): Boolean? {
+        val m = Regex("\"$name\"\\s*:\\s*(true|false)").find(text) ?: return null
+        return m.groupValues[1] == "true"
     }
 
     private fun intArrayField(text: String, name: String): List<Int> {

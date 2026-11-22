@@ -11,25 +11,45 @@ import android.os.IBinder
 import android.os.PowerManager
 import dev.forgebox.app.R
 import dev.forgebox.app.terminal.TerminalSessionController
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 /**
- * M6: owns the single PTY session lifetime in foreground. Rust runtime remains
+ * M7: owns N PTY session lifetimes in foreground. Rust runtime remains
  * process-wide singleton (M1 §3.1). Android 12+ phantom-process killer may still
  * terminate children; this service improves liveness but does not guarantee it.
  */
 class SessionService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
+    private val scope = CoroutineScope(Dispatchers.Main.immediate + Job())
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
+        scope.launch {
+            TerminalSessionController.state.collect { st ->
+                val content = NotificationContentBuilder.build(st.sessions, st.activePtyId, st.sessionCap)
+                if (content.shouldStopForeground) {
+                    releaseWakeLock()
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                } else {
+                    val manager = getSystemService(NotificationManager::class.java)
+                    manager.notify(NOTIFICATION_ID, buildNotification(content))
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP_TERMINAL -> TerminalSessionController.stop()
+            ACTION_STOP_ALL -> TerminalSessionController.stopAll()
             ACTION_END_ALL -> {
-                TerminalSessionController.closeSession()
+                TerminalSessionController.stopAll()
                 releaseWakeLock()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -38,7 +58,7 @@ class SessionService : Service() {
             ACTION_OPEN_TERMINAL -> {
                 acquireWakeLock()
                 val projectId = intent.getStringExtra(EXTRA_PROJECT_ID)
-                TerminalSessionController.open(projectId)
+                TerminalSessionController.open(this, projectId)
             }
         }
         startForeground(NOTIFICATION_ID, buildNotification())
@@ -46,7 +66,7 @@ class SessionService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        TerminalSessionController.closeSession()
+        TerminalSessionController.stopAll()
         releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -54,7 +74,8 @@ class SessionService : Service() {
     }
 
     override fun onDestroy() {
-        TerminalSessionController.closeSession()
+        scope.cancel()
+        TerminalSessionController.stopAll()
         releaseWakeLock()
         super.onDestroy()
     }
@@ -71,18 +92,21 @@ class SessionService : Service() {
         manager.createNotificationChannel(channel)
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(content: NotificationContent? = null): Notification {
         val stopIntent = PendingIntent.getService(this, 1, Intent(this, javaClass).setAction(ACTION_STOP_TERMINAL), PendingIntent.FLAG_IMMUTABLE)
+        val stopAllIntent = PendingIntent.getService(this, 3, Intent(this, javaClass).setAction(ACTION_STOP_ALL), PendingIntent.FLAG_IMMUTABLE)
         val endIntent = PendingIntent.getService(this, 2, Intent(this, javaClass).setAction(ACTION_END_ALL), PendingIntent.FLAG_IMMUTABLE)
-        val state = TerminalSessionController.state.value
-        return Notification.Builder(this, CHANNEL_ID)
+        val st = TerminalSessionController.state.value
+        val c = content ?: NotificationContentBuilder.build(st.sessions, st.activePtyId, st.sessionCap)
+        val b = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_forgebox)
-            .setContentTitle("ForgeBox terminal")
-            .setContentText(if (state.ptyId != null) "Session running: ${state.cwdLabel}" else "No active terminal session")
+            .setContentTitle(c.title)
+            .setContentText(c.text)
             .setOngoing(true)
-            .addAction(Notification.Action.Builder(null, "Stop terminal", stopIntent).build())
-            .addAction(Notification.Action.Builder(null, "End all", endIntent).build())
-            .build()
+        if (c.showStopActive) b.addAction(Notification.Action.Builder(null, "Stop active", stopIntent).build())
+        if (c.showStopAll) b.addAction(Notification.Action.Builder(null, "Stop all", stopAllIntent).build())
+        if (c.showEndAll) b.addAction(Notification.Action.Builder(null, "End all", endIntent).build())
+        return b.build()
     }
 
     private fun acquireWakeLock() {
@@ -104,6 +128,7 @@ class SessionService : Service() {
         const val NOTIFICATION_ID = 1001
         const val ACTION_OPEN_TERMINAL = "dev.forgebox.action.OPEN_TERMINAL"
         const val ACTION_STOP_TERMINAL = "dev.forgebox.action.STOP_TERMINAL"
+        const val ACTION_STOP_ALL = "dev.forgebox.action.STOP_ALL"
         const val ACTION_END_ALL = "dev.forgebox.action.END_ALL"
         const val EXTRA_PROJECT_ID = "project_id"
 

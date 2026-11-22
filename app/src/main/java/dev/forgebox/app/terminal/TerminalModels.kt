@@ -6,15 +6,38 @@ data class TerminalRenderState(
     val lines: List<String> = List(24) { "" },
     val cursorRow: Int = 0,
     val cursorCol: Int = 0,
+    val scrollTop: Int = 0,
+    val totalLines: Int = 24,
+    val fg: Int = 0xFFDDDDDD.toInt(),
+    val bg: Int = 0xFF111111.toInt(),
+    val bold: Boolean = false,
+    val underline: Boolean = false,
+    val inverse: Boolean = false,
+)
+
+enum class TerminalSessionLifecycle { STARTING, RUNNING, EXITED, STOPPED, CRASHED, RESTORABLE }
+
+data class TerminalSessionUi(
+    val ptyId: Long,
+    val name: String,
+    val cwdLabel: String,
+    val cwd: String = "",
+    val lifecycle: TerminalSessionLifecycle,
+    val exitCode: Int? = null,
+    val render: TerminalRenderState = TerminalRenderState(),
+    val previousProcessEnded: Boolean = false,
+    val restorable: Boolean = false,
+    val scrollbackNotice: String? = null,
+    val envOverridesJson: String = "{}",
 )
 
 data class TerminalUiState(
     val open: Boolean = false,
-    val ptyId: Long? = null,
     val projectId: String? = null,
-    val cwdLabel: String = "ForgeBox",
+    val sessions: List<TerminalSessionUi> = emptyList(),
+    val activePtyId: Long? = null,
+    val sessionCap: Int = 6,
     val status: String = "stopped",
-    val render: TerminalRenderState = TerminalRenderState(),
-    val exitCode: Int? = null,
     val hintShown: Boolean = false,
+    val restoreBanner: String? = null,
 )

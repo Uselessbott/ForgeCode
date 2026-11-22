@@ -20,7 +20,7 @@ pub struct PtySession {
     pub master_fd: i32,
     pub child_pid: i32,
     pub pgid: i32,
-    closed: AtomicBool,
+    pub(crate) closed: AtomicBool,
 }
 
 #[cfg(unix)]

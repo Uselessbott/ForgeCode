@@ -32,6 +32,25 @@ fn throw(env: &mut JNIEnv<'_>, message: &str) {
     let _ = env.throw_new("java/lang/IllegalStateException", message);
 }
 
+fn parse_env_overrides_json(json: &str) -> Vec<(String, String)> {
+    // Minimal parser for flat {"K":"V"} object; env overrides are optional M7.
+    let mut out = Vec::new();
+    let trimmed = json.trim();
+    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+        return out;
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    for part in inner.split(',') {
+        let mut kv = part.splitn(2, ':');
+        let k = kv.next().unwrap_or("").trim().trim_matches('"');
+        let v = kv.next().unwrap_or("").trim().trim_matches('"');
+        if !k.is_empty() {
+            out.push((k.to_string(), v.to_string()));
+        }
+    }
+    out
+}
+
 #[no_mangle]
 pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativeVersion(
     env: JNIEnv<'_>,
@@ -158,8 +177,11 @@ pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativePtyOpen(
     _class: JClass<'_>,
     handle: jlong,
     project_id: JString<'_>,
+    name: JString<'_>,
+    env_overrides_json: JString<'_>,
     cols: jint,
     rows: jint,
+    session_cap: jint,
 ) -> jlong {
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<jlong, String> {
         if handle == 0 {
@@ -178,8 +200,33 @@ pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativePtyOpen(
         } else {
             Some(project)
         };
+        let name: String = if name.is_null() {
+            String::new()
+        } else {
+            env.get_string(&name).map_err(|e| e.to_string())?.into()
+        };
+        let name = if name.trim().is_empty() {
+            None
+        } else {
+            Some(name)
+        };
+        let env_json: String = if env_overrides_json.is_null() {
+            "{}".into()
+        } else {
+            env.get_string(&env_overrides_json)
+                .map_err(|e| e.to_string())?
+                .into()
+        };
+        let env_overrides = parse_env_overrides_json(&env_json);
         let id = runtime
-            .pty_open(project, cols.max(1) as u16, rows.max(1) as u16)
+            .pty_open(
+                project,
+                name,
+                env_overrides,
+                cols.max(1) as u16,
+                rows.max(1) as u16,
+                session_cap.max(1) as usize,
+            )
             .map_err(|e| e.to_string())?;
         Ok(id as jlong)
     }));
@@ -289,6 +336,105 @@ pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativePtyClose(
         Ok(Ok(())) => {}
         Ok(Err(m)) => throw(&mut env, &m),
         Err(_) => throw(&mut env, "Rust core panicked during pty close"),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativePtyRename(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    pty_id: jlong,
+    name: JString<'_>,
+) {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        if handle == 0 {
+            return Err("runtime is not initialized".into());
+        }
+        let runtime = unsafe { &*(handle as *const Runtime) };
+        let name: String = env.get_string(&name).map_err(|e| e.to_string())?.into();
+        runtime
+            .pty_rename(pty_id as u64, name)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }));
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(m)) => throw(&mut env, &m),
+        Err(_) => throw(&mut env, "Rust core panicked during pty rename"),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativePtyStopAll(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jint {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<jint, String> {
+        if handle == 0 {
+            return Err("runtime is not initialized".into());
+        }
+        let runtime = unsafe { &*(handle as *const Runtime) };
+        runtime
+            .pty_stop_all()
+            .map(|n| n as jint)
+            .map_err(|e| e.to_string())
+    }));
+    match result {
+        Ok(Ok(v)) => v,
+        Ok(Err(m)) => {
+            throw(&mut env, &m);
+            0
+        }
+        Err(_) => {
+            throw(&mut env, "Rust core panicked during pty stop all");
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativePollEventsTimeout(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    max: jint,
+    timeout_ms: jint,
+) -> jobjectArray {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<jobjectArray, String> {
+        if handle == 0 {
+            return Err("runtime is not initialized".into());
+        }
+        let runtime = unsafe { &*(handle as *const Runtime) };
+        let events = runtime.poll_events_timeout(max.max(0) as usize, timeout_ms.max(0) as u64);
+        let byte_array_class = env.find_class("[B").map_err(|e| e.to_string())?;
+        let array = env
+            .new_object_array(
+                events.len() as jni::sys::jsize,
+                byte_array_class,
+                JObject::null(),
+            )
+            .map_err(|e| e.to_string())?;
+        for (index, bytes) in events.iter().enumerate() {
+            let element = env
+                .byte_array_from_slice(bytes)
+                .map_err(|e| e.to_string())?;
+            env.set_object_array_element(&array, index as jni::sys::jsize, &element)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(array.into_raw())
+    }));
+    match result {
+        Ok(Ok(v)) => v,
+        Ok(Err(m)) => {
+            throw(&mut env, &m);
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            throw(&mut env, "Rust core panicked while polling events");
+            std::ptr::null_mut()
+        }
     }
 }
 
