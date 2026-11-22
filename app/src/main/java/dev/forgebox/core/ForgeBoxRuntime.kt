@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicLong
  * Process-local runtime owner. M7 will move ownership behind a lifecycle-aware
  * service boundary; M3 keeps it simple while preserving the single-handle rule.
  */
-object ForgeBoxRuntime {
+object ForgeBoxRuntime : ForgeBoxCore {
     private val handle = AtomicLong(0L)
     private val lock = Any()
 
@@ -29,7 +29,7 @@ object ForgeBoxRuntime {
         }
     }
 
-    fun call(request: ForgeProto.Request): ForgeProto.Response {
+    override fun call(request: ForgeProto.Request): ForgeProto.Response {
         val h = handle.get()
         check(h != 0L) { "ForgeBoxRuntime is not initialized" }
         val bytes = ForgeNative.nativeCall(h, request.toByteArray())

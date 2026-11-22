@@ -14,14 +14,16 @@ use crate::proto::event::Kind as EventKind;
 use crate::proto::request::Kind as RequestKind;
 use crate::proto::response::Kind as ResponseKind;
 use crate::proto::{
-    CreateProjectRequest, CreateProjectResponse, Error, Event, FileChangedEvent, FileEntry,
-    GetInfoRequest, GetInfoResponse, ListFilesRequest, ListFilesResponse, ListProjectsRequest,
-    ListProjectsResponse, LogEvent, Project, ReadFileRequest, ReadFileResponse, Request, Response,
-    Status, WriteFileRequest, WriteFileResponse,
+    CreateFolderRequest, CreateFolderResponse, CreateProjectRequest, CreateProjectResponse,
+    DeletePathRequest, DeletePathResponse, DeleteProjectRequest, DeleteProjectResponse, Error,
+    Event, FileChangedEvent, FileEntry, GetInfoRequest, GetInfoResponse, ListFilesRequest,
+    ListFilesResponse, ListProjectsRequest, ListProjectsResponse, LogEvent, Project,
+    ReadFileRequest, ReadFileResponse, RenameFileRequest, RenameFileResponse, RenameProjectRequest,
+    RenameProjectResponse, Request, Response, Status, WriteFileRequest, WriteFileResponse,
 };
 use crate::vfs;
 
-pub const CORE_VERSION: &str = "0.2.0-m3";
+pub const CORE_VERSION: &str = "0.3.0-m4";
 
 const WORKSPACE_DIRS: &[&str] = &[
     "Projects",
@@ -138,6 +140,21 @@ impl Runtime {
             Some(RequestKind::ListFiles(request)) => {
                 self.list_files(request).map(ResponseKind::ListFiles)
             }
+            Some(RequestKind::RenameFile(request)) => {
+                self.rename_file(request).map(ResponseKind::RenameFile)
+            }
+            Some(RequestKind::DeletePath(request)) => {
+                self.delete_path(request).map(ResponseKind::DeletePath)
+            }
+            Some(RequestKind::CreateFolder(request)) => {
+                self.create_folder(request).map(ResponseKind::CreateFolder)
+            }
+            Some(RequestKind::DeleteProject(request)) => self
+                .delete_project(request)
+                .map(ResponseKind::DeleteProject),
+            Some(RequestKind::RenameProject(request)) => self
+                .rename_project(request)
+                .map(ResponseKind::RenameProject),
             None => Err(CoreError::InvalidArgument("missing request kind".into())),
         }
     }
@@ -183,6 +200,7 @@ impl Runtime {
             name: request.name.clone(),
             path: path_string(&project_path),
             created_at: now_millis(),
+            storage_bytes: 0,
         };
         {
             let db = self.db.lock().map_err(lock_error)?;
@@ -254,27 +272,214 @@ impl Runtime {
         }
 
         let mut entries = Vec::new();
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
+        self.collect_entries(
+            &project_dir,
+            &relative,
+            &directory,
+            request.recursive,
+            &mut entries,
+        )?;
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(ListFilesResponse { entries })
+    }
+
+    fn collect_entries(
+        &self,
+        project_dir: &Path,
+        relative: &Path,
+        directory: &Path,
+        recursive: bool,
+        out: &mut Vec<FileEntry>,
+    ) -> Result<()> {
+        let mut dir_entries: Vec<_> =
+            fs::read_dir(directory)?.collect::<std::result::Result<Vec<_>, _>>()?;
+        dir_entries.sort_by_key(|e| e.file_name());
+        for entry in dir_entries {
             let file_type = entry.file_type()?;
             if file_type.is_symlink() {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
-            let child_relative = relative.join(&name).to_string_lossy().into_owned();
-            entries.push(FileEntry {
+            let child_relative = if relative.as_os_str().is_empty() {
+                PathBuf::from(&name)
+            } else {
+                relative.join(&name)
+            };
+            let child_relative_str = path_string(&child_relative).replace('\\', "/");
+            let is_dir = file_type.is_dir();
+            out.push(FileEntry {
                 name,
-                path: child_relative,
-                is_dir: file_type.is_dir(),
+                path: child_relative_str.clone(),
+                is_dir,
                 size: if file_type.is_file() {
                     entry.metadata()?.len()
                 } else {
                     0
                 },
             });
+            if recursive && is_dir {
+                let child_abs = vfs::resolve(project_dir, &child_relative, true)?;
+                self.collect_entries(project_dir, &child_relative, &child_abs, true, out)?;
+            }
         }
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(ListFilesResponse { entries })
+        Ok(())
+    }
+
+    fn create_folder(&self, request: CreateFolderRequest) -> Result<CreateFolderResponse> {
+        self.assert_project_exists(&request.project_id)?;
+        let relative = vfs::validate_relative_path(&request.path, false)?;
+        let project_dir = self.project_dir(&request.project_id)?;
+        let target = vfs::resolve_for_create(&project_dir, &relative, true)?;
+        if target.exists() {
+            return Err(CoreError::AlreadyExists(format!(
+                "path already exists: {}",
+                request.path
+            )));
+        }
+        fs::create_dir_all(&target)?;
+        self.emit_file_event(&request.project_id, &request.path, "folder_created")?;
+        Ok(CreateFolderResponse { path: request.path })
+    }
+
+    fn rename_file(&self, request: RenameFileRequest) -> Result<RenameFileResponse> {
+        self.assert_project_exists(&request.project_id)?;
+        let old_rel = vfs::validate_relative_path(&request.old_path, false)?;
+        let new_rel = vfs::validate_relative_path(&request.new_path, false)?;
+        let project_dir = self.project_dir(&request.project_id)?;
+        let old_target = vfs::resolve(&project_dir, &old_rel, true)?;
+        let new_target = vfs::resolve_for_create(&project_dir, &new_rel, true)?;
+        if new_target.exists() {
+            return Err(CoreError::AlreadyExists(format!(
+                "destination already exists: {}",
+                request.new_path
+            )));
+        }
+        if old_target == project_dir {
+            return Err(CoreError::InvalidArgument(
+                "cannot rename project root".into(),
+            ));
+        }
+        fs::rename(&old_target, &new_target)?;
+        {
+            let db = self.db.lock().map_err(lock_error)?;
+            db::rename_file_index(
+                &db,
+                &request.project_id,
+                &request.old_path,
+                &request.new_path,
+            )?;
+        }
+        self.emit_file_event(&request.project_id, &request.new_path, "renamed")?;
+        Ok(RenameFileResponse {
+            old_path: request.old_path,
+            new_path: request.new_path,
+        })
+    }
+
+    fn delete_path(&self, request: DeletePathRequest) -> Result<DeletePathResponse> {
+        self.assert_project_exists(&request.project_id)?;
+        let relative = vfs::validate_relative_path(&request.path, false)?;
+        let project_dir = self.project_dir(&request.project_id)?;
+        let target = vfs::resolve(&project_dir, &relative, true)?;
+        if target == project_dir {
+            return Err(CoreError::InvalidArgument(
+                "cannot delete project root".into(),
+            ));
+        }
+        let metadata = fs::symlink_metadata(&target)?;
+        if metadata.file_type().is_symlink() {
+            return Err(CoreError::PathEscape("symlink rejected".into()));
+        }
+        if metadata.is_dir() {
+            let mut entries = fs::read_dir(&target)?;
+            if entries.next().is_some() && !request.recursive {
+                return Err(CoreError::InvalidArgument(
+                    "directory is not empty; recursive delete required".into(),
+                ));
+            }
+            fs::remove_dir_all(&target)?;
+        } else {
+            fs::remove_file(&target)?;
+        }
+        {
+            let db = self.db.lock().map_err(lock_error)?;
+            db::delete_file_index_prefix(&db, &request.project_id, &request.path)?;
+        }
+        self.emit_file_event(&request.project_id, &request.path, "deleted")?;
+        Ok(DeletePathResponse { path: request.path })
+    }
+
+    fn delete_project(&self, request: DeleteProjectRequest) -> Result<DeleteProjectResponse> {
+        self.assert_project_exists(&request.project_id)?;
+        let project_dir = self.project_dir(&request.project_id)?;
+        let resolved = vfs::resolve(&project_dir, Path::new(""), true)?;
+        let canonical = fs::canonicalize(&project_dir)?;
+        if resolved != canonical {
+            return Err(CoreError::PathEscape(
+                "project root resolution mismatch".into(),
+            ));
+        }
+        fs::remove_dir_all(&resolved)?;
+        {
+            let db = self.db.lock().map_err(lock_error)?;
+            db::delete_project(&db, &request.project_id)?;
+        }
+        self.emit_file_event(&request.project_id, "", "project_deleted")?;
+        Ok(DeleteProjectResponse {
+            project_id: request.project_id,
+        })
+    }
+
+    fn rename_project(&self, request: RenameProjectRequest) -> Result<RenameProjectResponse> {
+        self.assert_project_exists(&request.project_id)?;
+        vfs::validate_project_name(&request.new_name)?;
+        if request.project_id == request.new_name {
+            return Err(CoreError::InvalidArgument("new name is unchanged".into()));
+        }
+        {
+            let db = self.db.lock().map_err(lock_error)?;
+            if db::project_exists(&db, &request.new_name)? {
+                return Err(CoreError::AlreadyExists(format!(
+                    "project already exists: {}",
+                    request.new_name
+                )));
+            }
+        }
+        let old_dir = self.project_dir(&request.project_id)?;
+        let new_dir = self.project_dir(&request.new_name)?;
+        if new_dir.exists() {
+            return Err(CoreError::AlreadyExists(format!(
+                "project directory already exists: {}",
+                request.new_name
+            )));
+        }
+        let old_resolved = vfs::resolve(&old_dir, Path::new(""), true)?;
+        fs::rename(&old_resolved, &new_dir)?;
+        let created_at = {
+            let db = self.db.lock().map_err(lock_error)?;
+            db::project_created_at(&db, &request.project_id)?
+        };
+        let project = Project {
+            id: request.new_name.clone(),
+            name: request.new_name.clone(),
+            path: path_string(&new_dir),
+            created_at,
+            storage_bytes: 0,
+        };
+        {
+            let db = self.db.lock().map_err(lock_error)?;
+            db::rename_project(
+                &db,
+                &request.project_id,
+                &request.new_name,
+                &request.new_name,
+                &project.path,
+            )?;
+        }
+        self.emit_file_event(&request.new_name, "", "project_renamed")?;
+        Ok(RenameProjectResponse {
+            project: Some(project),
+        })
     }
 
     fn project_dir(&self, project_id: &str) -> Result<PathBuf> {
@@ -372,6 +577,24 @@ mod tests {
         assert_eq!(response.status, Status::Ok as i32, "{:?}", response.error);
     }
 
+    fn setup_runtime() -> (tempfile::TempDir, Runtime) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let native = root.join("lib");
+        fs::create_dir_all(&native).unwrap();
+        let db = root.join("internal/db/forgebox.sqlite");
+        let runtime = Runtime::new(root, native, db).unwrap();
+        (temp, runtime)
+    }
+
+    fn create_project(runtime: &Runtime, id: u32, name: &str) {
+        let resp = response(runtime.call(&request(
+            id,
+            RequestKind::CreateProject(CreateProjectRequest { name: name.into() }),
+        )));
+        assert_ok(&resp, id);
+    }
+
     #[test]
     fn full_workspace_flow_round_trips() {
         let temp = tempfile::tempdir().unwrap();
@@ -442,6 +665,7 @@ mod tests {
             RequestKind::ListFiles(ListFilesRequest {
                 project_id: "MyPythonApp".into(),
                 path: String::new(),
+                recursive: false,
             }),
         )));
         assert_ok(&listed, 5);
@@ -483,5 +707,151 @@ mod tests {
             },
             1
         );
+    }
+
+    #[test]
+    fn rename_and_delete_path_enforce_security_rules() {
+        let (_temp, runtime) = setup_runtime();
+        create_project(&runtime, 1, "Proj");
+
+        // Create nested file
+        let write = response(runtime.call(&request(
+            2,
+            RequestKind::WriteFile(WriteFileRequest {
+                project_id: "Proj".into(),
+                path: "dir/a.txt".into(),
+                content: b"hi".to_vec(),
+            }),
+        )));
+        assert_ok(&write, 2);
+
+        // traversal rejection
+        let bad_rename = response(runtime.call(&request(
+            3,
+            RequestKind::RenameFile(RenameFileRequest {
+                project_id: "Proj".into(),
+                old_path: "dir/a.txt".into(),
+                new_path: "../escape.txt".into(),
+            }),
+        )));
+        assert_eq!(bad_rename.status, Status::Error as i32);
+        assert_eq!(bad_rename.error.unwrap().code, "INVALID_ARGUMENT");
+
+        let bad_delete = response(runtime.call(&request(
+            4,
+            RequestKind::DeletePath(DeletePathRequest {
+                project_id: "Proj".into(),
+                path: "../escape".into(),
+                recursive: true,
+            }),
+        )));
+        assert_eq!(bad_delete.status, Status::Error as i32);
+
+        // delete project root rejected
+        let root_delete = response(runtime.call(&request(
+            5,
+            RequestKind::DeletePath(DeletePathRequest {
+                project_id: "Proj".into(),
+                path: "".into(),
+                recursive: true,
+            }),
+        )));
+        assert_eq!(root_delete.status, Status::Error as i32);
+
+        // non-recursive delete of non-empty dir rejected
+        let non_recursive = response(runtime.call(&request(
+            6,
+            RequestKind::DeletePath(DeletePathRequest {
+                project_id: "Proj".into(),
+                path: "dir".into(),
+                recursive: false,
+            }),
+        )));
+        assert_eq!(non_recursive.status, Status::Error as i32);
+        assert!(non_recursive.error.unwrap().message.contains("recursive"));
+
+        // successful rename
+        let renamed = response(runtime.call(&request(
+            7,
+            RequestKind::RenameFile(RenameFileRequest {
+                project_id: "Proj".into(),
+                old_path: "dir/a.txt".into(),
+                new_path: "dir/b.txt".into(),
+            }),
+        )));
+        assert_ok(&renamed, 7);
+        let read_old = response(runtime.call(&request(
+            8,
+            RequestKind::ReadFile(ReadFileRequest {
+                project_id: "Proj".into(),
+                path: "dir/a.txt".into(),
+            }),
+        )));
+        assert_eq!(read_old.status, Status::Error as i32);
+        let read_new = response(runtime.call(&request(
+            9,
+            RequestKind::ReadFile(ReadFileRequest {
+                project_id: "Proj".into(),
+                path: "dir/b.txt".into(),
+            }),
+        )));
+        assert_ok(&read_new, 9);
+
+        // successful recursive delete
+        let deleted = response(runtime.call(&request(
+            10,
+            RequestKind::DeletePath(DeletePathRequest {
+                project_id: "Proj".into(),
+                path: "dir".into(),
+                recursive: true,
+            }),
+        )));
+        assert_ok(&deleted, 10);
+        let listed = response(runtime.call(&request(
+            11,
+            RequestKind::ListFiles(ListFilesRequest {
+                project_id: "Proj".into(),
+                path: String::new(),
+                recursive: true,
+            }),
+        )));
+        assert_ok(&listed, 11);
+        let entries = match listed.kind.unwrap() {
+            ResponseKind::ListFiles(l) => l.entries,
+            _ => panic!("unexpected"),
+        };
+        assert!(entries.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_and_delete_reject_symlinks() {
+        use std::os::unix::fs::symlink;
+        let (_temp, runtime) = setup_runtime();
+        create_project(&runtime, 1, "Proj");
+        let root = runtime.workspace_root.join("Projects").join("Proj");
+        let outside = _temp.path().join("outside.txt");
+        fs::write(&outside, b"x").unwrap();
+        symlink(&outside, root.join("leak.txt")).unwrap();
+
+        let rename = response(runtime.call(&request(
+            2,
+            RequestKind::RenameFile(RenameFileRequest {
+                project_id: "Proj".into(),
+                old_path: "leak.txt".into(),
+                new_path: "safe.txt".into(),
+            }),
+        )));
+        assert_eq!(rename.status, Status::Error as i32);
+
+        let delete = response(runtime.call(&request(
+            3,
+            RequestKind::DeletePath(DeletePathRequest {
+                project_id: "Proj".into(),
+                path: "leak.txt".into(),
+                recursive: false,
+            }),
+        )));
+        assert_eq!(delete.status, Status::Error as i32);
     }
 }

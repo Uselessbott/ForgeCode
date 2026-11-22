@@ -116,12 +116,20 @@ pub fn resolve(root: &Path, relative: &Path, must_exist: bool) -> Result<PathBuf
 /// Resolve the final component of a file that is about to be written. Parent
 /// directories are created; existing final symlinks are rejected.
 pub fn resolve_for_write(root: &Path, relative: &Path) -> Result<PathBuf> {
+    resolve_for_create(root, relative, true)
+}
+
+/// Resolve a path for creation (file or folder). When `create_parent` is true,
+/// missing parent directories are created. Existing final symlinks are rejected.
+pub fn resolve_for_create(root: &Path, relative: &Path, create_parent: bool) -> Result<PathBuf> {
     let file_name = relative
         .file_name()
         .ok_or_else(|| CoreError::InvalidArgument("path has no file name".into()))?;
     let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
-    let parent = resolve(root, parent_relative, false)?;
-    fs::create_dir_all(&parent)?;
+    let parent = resolve(root, parent_relative, !create_parent)?;
+    if create_parent {
+        fs::create_dir_all(&parent)?;
+    }
     let parent = resolve(root, parent_relative, true)?;
 
     let final_path = parent.join(file_name);

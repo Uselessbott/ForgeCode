@@ -18,6 +18,11 @@ message Request {
     WriteFileRequest write_file = 5;
     ReadFileRequest read_file = 6;
     ListFilesRequest list_files = 7;
+    RenameFileRequest rename_file = 8;
+    DeletePathRequest delete_path = 9;
+    CreateFolderRequest create_folder = 10;
+    DeleteProjectRequest delete_project = 11;
+    RenameProjectRequest rename_project = 12;
   }
 }
 
@@ -32,6 +37,11 @@ message Response {
     WriteFileResponse write_file = 7;
     ReadFileResponse read_file = 8;
     ListFilesResponse list_files = 9;
+    RenameFileResponse rename_file = 10;
+    DeletePathResponse delete_path = 11;
+    CreateFolderResponse create_folder = 12;
+    DeleteProjectResponse delete_project = 13;
+    RenameProjectResponse rename_project = 14;
   }
 }
 
@@ -61,6 +71,7 @@ message Project {
   string name = 2;
   string path = 3;
   int64 created_at = 4;
+  uint64 storage_bytes = 5;
 }
 
 message CreateProjectRequest {
@@ -100,6 +111,7 @@ message ReadFileResponse {
 message ListFilesRequest {
   string project_id = 1;
   string path = 2;
+  bool recursive = 3;
 }
 
 message FileEntry {
@@ -111,6 +123,53 @@ message FileEntry {
 
 message ListFilesResponse {
   repeated FileEntry entries = 1;
+}
+
+message RenameFileRequest {
+  string project_id = 1;
+  string old_path = 2;
+  string new_path = 3;
+}
+
+message RenameFileResponse {
+  string old_path = 1;
+  string new_path = 2;
+}
+
+message DeletePathRequest {
+  string project_id = 1;
+  string path = 2;
+  bool recursive = 3;
+}
+
+message DeletePathResponse {
+  string path = 1;
+}
+
+message CreateFolderRequest {
+  string project_id = 1;
+  string path = 2;
+}
+
+message CreateFolderResponse {
+  string path = 1;
+}
+
+message DeleteProjectRequest {
+  string project_id = 1;
+}
+
+message DeleteProjectResponse {
+  string project_id = 1;
+}
+
+message RenameProjectRequest {
+  string project_id = 1;
+  string new_name = 2;
+}
+
+message RenameProjectResponse {
+  Project project = 1;
 }
 
 // Events are pushed to Kotlin by pollEvents. They are persisted to SQLite as
