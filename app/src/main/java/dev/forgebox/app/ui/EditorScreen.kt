@@ -1,21 +1,24 @@
 package dev.forgebox.app.ui
 
-import android.view.KeyEvent
 import android.view.ViewGroup
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -33,11 +36,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import dev.forgebox.app.service.SessionService
+import dev.forgebox.app.terminal.TerminalPanel
+import dev.forgebox.app.terminal.TerminalSessionController
 import io.github.rosemoe.sora.event.ContentChangeEvent
 import io.github.rosemoe.sora.widget.CodeEditor
+import kotlinx.coroutines.delay
 
 @Composable
 fun EditorScreen(
@@ -54,8 +63,20 @@ fun EditorScreen(
     var replaceQuery by remember { mutableStateOf("") }
     var goToLine by remember { mutableStateOf("") }
     val editorRef = remember { mutableStateOf<CodeEditor?>(null) }
+    val terminalState by TerminalSessionController.state.collectAsState()
+    var terminalFraction by remember { mutableStateOf(0.4f) }
+    val context = LocalContext.current
 
     LaunchedEffect(projectId, initialPath) { viewModel.openFile(projectId, initialPath) }
+    LaunchedEffect(terminalState.open) {
+        if (terminalState.open) SessionService.open(context, projectId)
+    }
+    LaunchedEffect(terminalState.open, terminalState.ptyId, state.activeIndex) {
+        while (terminalState.open) {
+            viewModel.checkActiveDiskChange()
+            delay(2000)
+        }
+    }
 
     Scaffold { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
@@ -64,6 +85,7 @@ fun EditorScreen(
                 Text(projectId, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 TextButton(onClick = { showGoTo = true }) { Text("Go to line") }
                 TextButton(onClick = { showFind = true }) { Text("Find") }
+                TextButton(onClick = { TerminalSessionController.toggle(projectId) }) { Text(if (terminalState.open) "Hide Terminal" else "Terminal") }
                 TextButton(onClick = { viewModel.saveActive() }) { Text("Save") }
             }
 
@@ -92,32 +114,53 @@ fun EditorScreen(
             }
 
             val tab = state.tabs.getOrNull(state.activeIndex)
-            when {
-                tab == null -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { Text("No open file") }
-                tab.loading -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-                tab.error != null -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(tab.error ?: "Error", color = MaterialTheme.colorScheme.error)
-                        if (tab.tooLarge || tab.readOnly) Text("M5 guard: file not editable in editor.", style = MaterialTheme.typography.bodySmall)
-                        Button(onClick = { viewModel.reloadActive() }) { Text("Reload") }
-                    }
-                }
-                else -> {
-                    tab.conflict?.let {
-                        Text("Conflict: $it", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp))
-                        Row(Modifier.padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = { viewModel.reloadActive() }) { Text("Reload disk") }
-                            Button(onClick = { viewModel.overwriteActive() }) { Text("Overwrite disk") }
+            val editorWeight = if (terminalState.open) 1f - terminalFraction else 1f
+            Column(Modifier.weight(editorWeight).fillMaxWidth()) {
+                when {
+                    tab == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No open file") }
+                    tab.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                    tab.error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(tab.error ?: "Error", color = MaterialTheme.colorScheme.error)
+                            if (tab.tooLarge || tab.readOnly) Text("M5 guard: file not editable in editor.", style = MaterialTheme.typography.bodySmall)
+                            Button(onClick = { viewModel.reloadActive() }) { Text("Reload") }
                         }
                     }
-                    SoraEditorView(
-                        text = tab.content,
-                        readOnly = tab.readOnly,
-                        onTextChanged = { viewModel.onContentChanged(state.activeIndex, it) },
-                        editorRef = editorRef,
-                        modifier = Modifier.weight(1f).fillMaxWidth(),
-                    )
+                    else -> {
+                        tab.conflict?.let {
+                            Text("Conflict: $it", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp))
+                            Row(Modifier.padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = { viewModel.reloadActive() }) { Text("Reload disk") }
+                                Button(onClick = { viewModel.overwriteActive() }) { Text("Overwrite disk") }
+                            }
+                        }
+                        SoraEditorView(
+                            text = tab.content,
+                            readOnly = tab.readOnly,
+                            onTextChanged = { viewModel.onContentChanged(state.activeIndex, it) },
+                            editorRef = editorRef,
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                        )
+                    }
                 }
+            }
+
+            if (terminalState.open) {
+                Box(
+                    Modifier.fillMaxWidth().height(10.dp).pointerInput(Unit) {
+                        detectDragGestures { _, drag -> terminalFraction = (terminalFraction - drag.y / 1000f).coerceIn(0.2f, 0.7f) }
+                    },
+                    contentAlignment = Alignment.Center,
+                ) { HorizontalDivider() }
+                TerminalPanel(
+                    state = terminalState,
+                    onWrite = TerminalSessionController::write,
+                    onWriteBytes = TerminalSessionController::writeBytes,
+                    onSignal = TerminalSessionController::signal,
+                    onStop = TerminalSessionController::stop,
+                    onCloseSession = TerminalSessionController::closeSession,
+                    modifier = Modifier.fillMaxWidth().weight(terminalFraction),
+                )
             }
 
             ProgrammingToolbar(onAction = { action -> applyToolbarAction(editorRef.value, action) })

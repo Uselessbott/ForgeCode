@@ -11,7 +11,9 @@ pub mod error;
 pub mod vfs;
 
 mod db;
+mod pty;
 mod runtime;
+mod terminal;
 
 pub use runtime::{Runtime, CORE_VERSION};
 
@@ -147,6 +149,146 @@ pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativePollEvents(
             throw(&mut env, "Rust core panicked while polling events");
             std::ptr::null_mut()
         }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativePtyOpen(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    project_id: JString<'_>,
+    cols: jint,
+    rows: jint,
+) -> jlong {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<jlong, String> {
+        if handle == 0 {
+            return Err("runtime is not initialized".into());
+        }
+        let runtime = unsafe { &*(handle as *const Runtime) };
+        let project: String = if project_id.is_null() {
+            String::new()
+        } else {
+            env.get_string(&project_id)
+                .map_err(|e| e.to_string())?
+                .into()
+        };
+        let project = if project.is_empty() {
+            None
+        } else {
+            Some(project)
+        };
+        let id = runtime
+            .pty_open(project, cols.max(1) as u16, rows.max(1) as u16)
+            .map_err(|e| e.to_string())?;
+        Ok(id as jlong)
+    }));
+    match result {
+        Ok(Ok(v)) => v,
+        Ok(Err(m)) => {
+            throw(&mut env, &m);
+            0
+        }
+        Err(_) => {
+            throw(&mut env, "Rust core panicked during pty open");
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativePtyWrite(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    pty_id: jlong,
+    data: jbyteArray,
+) {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        if handle == 0 {
+            return Err("runtime is not initialized".into());
+        }
+        let runtime = unsafe { &*(handle as *const Runtime) };
+        let data = unsafe { JByteArray::from_raw(data) };
+        let bytes = env.convert_byte_array(data).map_err(|e| e.to_string())?;
+        runtime
+            .pty_write(pty_id as u64, &bytes)
+            .map_err(|e| e.to_string())
+    }));
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(m)) => throw(&mut env, &m),
+        Err(_) => throw(&mut env, "Rust core panicked during pty write"),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativePtyResize(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    pty_id: jlong,
+    cols: jint,
+    rows: jint,
+) {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        if handle == 0 {
+            return Err("runtime is not initialized".into());
+        }
+        let runtime = unsafe { &*(handle as *const Runtime) };
+        runtime
+            .pty_resize(pty_id as u64, cols.max(1) as u16, rows.max(1) as u16)
+            .map_err(|e| e.to_string())
+    }));
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(m)) => throw(&mut env, &m),
+        Err(_) => throw(&mut env, "Rust core panicked during pty resize"),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativePtySignal(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    pty_id: jlong,
+    signal: jint,
+) {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        if handle == 0 {
+            return Err("runtime is not initialized".into());
+        }
+        let runtime = unsafe { &*(handle as *const Runtime) };
+        runtime
+            .pty_signal(pty_id as u64, signal)
+            .map_err(|e| e.to_string())
+    }));
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(m)) => throw(&mut env, &m),
+        Err(_) => throw(&mut env, "Rust core panicked during pty signal"),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_dev_forgebox_core_ForgeNative_nativePtyClose(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    pty_id: jlong,
+) {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        if handle == 0 {
+            return Err("runtime is not initialized".into());
+        }
+        let runtime = unsafe { &*(handle as *const Runtime) };
+        runtime.pty_close(pty_id as u64).map_err(|e| e.to_string())
+    }));
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(m)) => throw(&mut env, &m),
+        Err(_) => throw(&mut env, "Rust core panicked during pty close"),
     }
 }
 

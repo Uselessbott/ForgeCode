@@ -10,9 +10,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 jni = { version = "0.21", default-features = false }
+libc = "0.2"
 prost = "0.14"
 rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
+vte = "0.13"
 
 [build-dependencies]
 prost-build = "0.14"

@@ -151,6 +151,26 @@ class EditorViewModel(
         if (index >= 0) loadTab(index)
     }
 
+    /** M6: terminal may modify files; detect disk changes without silently losing dirty edits. */
+    fun checkActiveDiskChange() {
+        val index = _state.value.activeIndex
+        val tab = _state.value.tabs.getOrNull(index) ?: return
+        if (tab.loading || tab.tooLarge || tab.readOnly) return
+        viewModelScope.launch(io) {
+            val stat = repository.statFile(tab.projectId, tab.path).getOrNull() ?: return@launch
+            val latest = _state.value.tabs.getOrNull(index) ?: return@launch
+            if (latest.projectId != tab.projectId || latest.path != tab.path) return@launch
+            val decision = diskChangeDecision(latest.dirty, latest.mtimeMillis, stat.mtimeMillis)
+            when (decision) {
+                DiskChangeDecision.NONE -> Unit
+                DiskChangeDecision.RELOAD -> loadTab(index)
+                DiskChangeDecision.CONFLICT -> updateTab(index) {
+                    it.copy(conflict = "File changed on disk by terminal or another process. Reload disk or Overwrite disk.")
+                }
+            }
+        }
+    }
+
     fun selectTab(index: Int) {
         if (index in _state.value.tabs.indices) _state.value = _state.value.copy(activeIndex = index)
     }
@@ -181,11 +201,19 @@ class EditorViewModel(
         _state.value = _state.value.copy(tabs = tabs)
     }
 
+    enum class DiskChangeDecision { NONE, RELOAD, CONFLICT }
+
     companion object {
         fun detectLineEnding(text: String): String = if (text.contains("\r\n")) "\r\n" else "\n"
         fun normalizeToLineEnding(text: String, eol: String): String {
             val normalized = text.replace("\r\n", "\n").replace("\r", "\n")
             return if (eol == "\r\n") normalized.replace("\n", "\r\n") else normalized
+        }
+
+        fun diskChangeDecision(dirty: Boolean, knownMtimeMillis: Long, diskMtimeMillis: Long): DiskChangeDecision {
+            if (knownMtimeMillis <= 0L || diskMtimeMillis <= 0L) return DiskChangeDecision.NONE
+            if (diskMtimeMillis == knownMtimeMillis) return DiskChangeDecision.NONE
+            return if (dirty) DiskChangeDecision.CONFLICT else DiskChangeDecision.RELOAD
         }
 
         fun factory(repository: WorkspaceRepository, io: CoroutineDispatcher = Dispatchers.IO) =

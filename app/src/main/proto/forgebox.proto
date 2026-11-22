@@ -211,6 +211,10 @@ message Event {
   oneof kind {
     FileChangedEvent file_changed = 3;
     LogEvent log = 4;
+    TerminalOutputEvent terminal_output = 5;
+    TerminalExitEvent terminal_exit = 6;
+    TerminalTitleEvent terminal_title = 7;
+    TerminalCwdEvent terminal_cwd = 8;
   }
 }
 
@@ -223,4 +227,24 @@ message FileChangedEvent {
 message LogEvent {
   string level = 1;
   string message = 2;
+}
+
+message TerminalOutputEvent {
+  uint64 pty_id = 1;
+  bytes diff_bytes = 2; // UTF-8 JSON diff: {lines:[...],cursor:[r,c],rows,cols}
+}
+
+message TerminalExitEvent {
+  uint64 pty_id = 1;
+  int32 code = 2;
+}
+
+message TerminalTitleEvent {
+  uint64 pty_id = 1;
+  string title = 2;
+}
+
+message TerminalCwdEvent {
+  uint64 pty_id = 1;
+  string cwd = 2;
 }

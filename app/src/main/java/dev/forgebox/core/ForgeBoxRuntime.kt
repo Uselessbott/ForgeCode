@@ -42,6 +42,36 @@ object ForgeBoxRuntime : ForgeBoxCore {
         return ForgeNative.nativePollEvents(h, max).map { ForgeProto.Event.parseFrom(it) }
     }
 
+    fun ptyOpen(projectId: String?, cols: Int, rows: Int): Long {
+        val h = handle.get()
+        check(h != 0L) { "ForgeBoxRuntime is not initialized" }
+        return ForgeNative.nativePtyOpen(h, projectId, cols, rows)
+    }
+
+    fun ptyWrite(ptyId: Long, data: ByteArray) {
+        val h = handle.get()
+        check(h != 0L) { "ForgeBoxRuntime is not initialized" }
+        ForgeNative.nativePtyWrite(h, ptyId, data)
+    }
+
+    fun ptyResize(ptyId: Long, cols: Int, rows: Int) {
+        val h = handle.get()
+        check(h != 0L) { "ForgeBoxRuntime is not initialized" }
+        ForgeNative.nativePtyResize(h, ptyId, cols, rows)
+    }
+
+    fun ptySignal(ptyId: Long, signal: Int) {
+        val h = handle.get()
+        check(h != 0L) { "ForgeBoxRuntime is not initialized" }
+        ForgeNative.nativePtySignal(h, ptyId, signal)
+    }
+
+    fun ptyClose(ptyId: Long) {
+        val h = handle.get()
+        if (h == 0L) return
+        ForgeNative.nativePtyClose(h, ptyId)
+    }
+
     fun shutdown() {
         val h = handle.getAndSet(0L)
         if (h != 0L) {

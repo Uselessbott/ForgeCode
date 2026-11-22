@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use prost::Message;
 use rusqlite::Connection;
@@ -22,9 +22,11 @@ use crate::proto::{
     RenameProjectResponse, Request, Response, StatFileRequest, StatFileResponse, Status,
     WriteFileIfUnchangedRequest, WriteFileIfUnchangedResponse, WriteFileRequest, WriteFileResponse,
 };
+use crate::pty;
+use crate::terminal::TerminalEngine;
 use crate::vfs;
 
-pub const CORE_VERSION: &str = "0.4.0-m5";
+pub const CORE_VERSION: &str = "0.5.0-m6";
 pub const MAX_EDITABLE_FILE_BYTES: u64 = 1024 * 1024; // 1 MiB for M5 editor guard
 
 const WORKSPACE_DIRS: &[&str] = &[
@@ -40,6 +42,13 @@ const WORKSPACE_DIRS: &[&str] = &[
 
 const INTERNAL_DIRS: &[&str] = &["db", "audit", "checkpoints", "journal", "secrets"];
 
+struct PtyHandle {
+    session: pty::PtySession,
+    terminal: Mutex<TerminalEngine>,
+    stop: Arc<AtomicBool>,
+    join: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
 pub struct Runtime {
     app_data_dir: PathBuf,
     native_lib_dir: PathBuf,
@@ -48,6 +57,26 @@ pub struct Runtime {
     db: Mutex<Connection>,
     events: Mutex<VecDeque<Vec<u8>>>,
     next_seq: AtomicU64,
+    next_pty_id: AtomicU64,
+    ptys: Mutex<std::collections::HashMap<u64, Arc<PtyHandle>>>,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        if let Ok(mut ptys) = self.ptys.lock() {
+            let handles: Vec<_> = ptys.drain().map(|(_, h)| h).collect();
+            drop(ptys);
+            for handle in handles {
+                handle.stop.store(true, Ordering::SeqCst);
+                let _ = pty::close(&handle.session);
+                if let Ok(mut join) = handle.join.lock() {
+                    if let Some(j) = join.take() {
+                        let _ = j.join();
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Runtime {
@@ -73,6 +102,8 @@ impl Runtime {
             db: Mutex::new(db),
             events: Mutex::new(VecDeque::new()),
             next_seq: AtomicU64::new(next_seq),
+            next_pty_id: AtomicU64::new(1),
+            ptys: Mutex::new(std::collections::HashMap::new()),
         };
         runtime.emit_event_kind(EventKind::Log(LogEvent {
             level: "info".into(),
@@ -108,6 +139,167 @@ impl Runtime {
         };
         let count = max.min(queue.len());
         (0..count).filter_map(|_| queue.pop_front()).collect()
+    }
+
+    pub fn pty_open(&self, project_id: Option<String>, cols: u16, rows: u16) -> Result<u64> {
+        let cwd = self.resolve_pty_cwd(project_id.as_deref())?;
+        let shell = PathBuf::from("/system/bin/sh");
+        let shell = if shell.exists() {
+            shell
+        } else {
+            PathBuf::from("/bin/sh")
+        };
+        let mut env = vec![
+            (
+                "HOME".to_string(),
+                format!("{}/.forgebox-home", cwd.to_string_lossy()),
+            ),
+            ("PATH".to_string(), "/system/bin:/system/xbin".to_string()),
+            ("TERM".to_string(), "xterm-256color".to_string()),
+            ("LANG".to_string(), "C.UTF-8".to_string()),
+            (
+                "TMPDIR".to_string(),
+                self.workspace_root
+                    .join("Temporary")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ];
+        env.push(("PWD".to_string(), cwd.to_string_lossy().into_owned()));
+        let config = pty::PtyConfig {
+            shell_path: shell,
+            cwd,
+            env,
+            cols,
+            rows,
+        };
+        let mut session = pty::spawn(&config)?;
+        let id = self.next_pty_id.fetch_add(1, Ordering::SeqCst);
+        session.id = id;
+        let handle = Arc::new(PtyHandle {
+            session,
+            terminal: Mutex::new(TerminalEngine::new(rows as usize, cols as usize)),
+            stop: Arc::new(AtomicBool::new(false)),
+            join: Mutex::new(None),
+        });
+        let reader_handle = Arc::clone(&handle);
+        let runtime_ptr = self as *const Runtime as usize;
+        let stop = Arc::clone(&handle.stop);
+        let join = std::thread::spawn(move || {
+            // Safety: runtime outlives PTY handles (shutdown closes them). M6 singleton model.
+            let runtime = unsafe { &*(runtime_ptr as *const Runtime) };
+            let mut last_emit = std::time::Instant::now();
+            let mut pending = Vec::<u8>::new();
+            while !stop.load(Ordering::SeqCst) {
+                match pty::read_available(&reader_handle.session) {
+                    Ok(bytes) if !bytes.is_empty() => {
+                        pending.extend_from_slice(&bytes);
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+                let elapsed = last_emit.elapsed() >= Duration::from_millis(16);
+                if !pending.is_empty() && (elapsed || pending.len() >= 64 * 1024) {
+                    if let Ok(mut term) = reader_handle.terminal.lock() {
+                        term.feed(&pending);
+                        let diff = term.state.diff_json();
+                        let _ = runtime.emit_event_kind(EventKind::TerminalOutput(
+                            crate::proto::TerminalOutputEvent {
+                                pty_id: id,
+                                diff_bytes: diff,
+                            },
+                        ));
+                    }
+                    pending.clear();
+                    last_emit = std::time::Instant::now();
+                }
+                if let Ok(Some(code)) = pty::try_wait(&reader_handle.session) {
+                    if !pending.is_empty() {
+                        if let Ok(mut term) = reader_handle.terminal.lock() {
+                            term.feed(&pending);
+                            let diff = term.state.diff_json();
+                            let _ = runtime.emit_event_kind(EventKind::TerminalOutput(
+                                crate::proto::TerminalOutputEvent {
+                                    pty_id: id,
+                                    diff_bytes: diff,
+                                },
+                            ));
+                        }
+                    }
+                    let _ = runtime.emit_event_kind(EventKind::TerminalExit(
+                        crate::proto::TerminalExitEvent { pty_id: id, code },
+                    ));
+                    stop.store(true, Ordering::SeqCst);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        *handle.join.lock().map_err(lock_error)? = Some(join);
+        self.ptys.lock().map_err(lock_error)?.insert(id, handle);
+        Ok(id)
+    }
+
+    pub fn pty_write(&self, pty_id: u64, data: &[u8]) -> Result<()> {
+        let handle = self.get_pty(pty_id)?;
+        pty::write(&handle.session, data)
+    }
+
+    pub fn pty_resize(&self, pty_id: u64, cols: u16, rows: u16) -> Result<()> {
+        let handle = self.get_pty(pty_id)?;
+        handle
+            .terminal
+            .lock()
+            .map_err(lock_error)?
+            .resize(rows as usize, cols as usize);
+        pty::resize(&handle.session, cols, rows)
+    }
+
+    pub fn pty_signal(&self, pty_id: u64, sig: i32) -> Result<()> {
+        let handle = self.get_pty(pty_id)?;
+        pty::signal(&handle.session, sig)
+    }
+
+    pub fn pty_close(&self, pty_id: u64) -> Result<()> {
+        let handle = {
+            let mut ptys = self.ptys.lock().map_err(lock_error)?;
+            ptys.remove(&pty_id)
+                .ok_or_else(|| CoreError::NotFound(format!("pty not found: {pty_id}")))?
+        };
+        handle.stop.store(true, Ordering::SeqCst);
+        pty::close(&handle.session)?;
+        if let Some(join) = handle.join.lock().map_err(lock_error)?.take() {
+            let _ = join.join();
+        }
+        Ok(())
+    }
+
+    fn get_pty(&self, pty_id: u64) -> Result<Arc<PtyHandle>> {
+        self.ptys
+            .lock()
+            .map_err(lock_error)?
+            .get(&pty_id)
+            .cloned()
+            .ok_or_else(|| CoreError::NotFound(format!("pty not found: {pty_id}")))
+    }
+
+    fn resolve_pty_cwd(&self, project_id: Option<&str>) -> Result<PathBuf> {
+        let projects_root = fs::canonicalize(self.workspace_root.join("Projects"))?;
+        let workspace_root = fs::canonicalize(&self.workspace_root)?;
+        let cwd = match project_id.filter(|s| !s.is_empty()) {
+            Some(pid) => {
+                self.assert_project_exists(pid)?;
+                let dir = self.project_dir(pid)?;
+                crate::vfs::resolve(&dir, Path::new(""), true)?
+            }
+            None => workspace_root.clone(),
+        };
+        if !(cwd.starts_with(&projects_root) || cwd == workspace_root) {
+            return Err(CoreError::PathEscape(
+                "pty cwd must be under ForgeBox/Projects/<id> or ForgeBox root".into(),
+            ));
+        }
+        Ok(cwd)
     }
 
     pub fn app_data_dir(&self) -> &Path {
@@ -602,6 +794,10 @@ impl Runtime {
         let kind_name = match &kind {
             EventKind::FileChanged(_) => "file_changed",
             EventKind::Log(_) => "log",
+            EventKind::TerminalOutput(_) => "terminal_output",
+            EventKind::TerminalExit(_) => "terminal_exit",
+            EventKind::TerminalTitle(_) => "terminal_title",
+            EventKind::TerminalCwd(_) => "terminal_cwd",
         };
         let event = Event {
             seq,
@@ -1012,6 +1208,21 @@ mod tests {
             _ => panic!("unexpected"),
         };
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn pty_open_rejects_cwd_outside_forgebox_projects() {
+        let (_temp, runtime) = setup_runtime();
+        let err = runtime
+            .pty_open(Some("../escape".into()), 80, 24)
+            .unwrap_err();
+        match err {
+            CoreError::InvalidArgument(_)
+            | CoreError::PathEscape(_)
+            | CoreError::NotFound(_)
+            | CoreError::Internal(_) => {} // Windows host: PTY unsupported
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[cfg(unix)]
