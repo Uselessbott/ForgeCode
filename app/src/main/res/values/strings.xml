@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ForgeBox</string>
+    <string name="notification_channel">Development sessions</string>
+    <string name="notification_title">ForgeBox sessions</string>
+    <string name="notification_text">Development environment is ready</string>
+</resources>

@@ -1,0 +1,14 @@
+.gradle/
+.local/
+build/
+app/build/
+rust/**/target/
+app/src/main/jniLibs/
+captures/
+*.png
+.externalNativeBuild/
+.cxx/
+local.properties
+*.iml
+.idea/
+.DS_Store
