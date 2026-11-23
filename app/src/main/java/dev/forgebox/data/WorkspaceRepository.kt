@@ -235,8 +235,19 @@ class WorkspaceRepository(
         call(ForgeProto.Request.newBuilder().setLinuxEnvStatus(ForgeProto.LinuxEnvStatusRequest.getDefaultInstance())).linuxEnvStatus.toModel()
     }
 
-    fun linuxEnvInstall(distro: LinuxDistroUi): Result<ForgeProto.LinuxEnvInstallResponse> = runCatching {
-        call(ForgeProto.Request.newBuilder().setLinuxEnvInstall(ForgeProto.LinuxEnvInstallRequest.newBuilder().setDistro(distro.toProto()))).linuxEnvInstall
+    fun linuxEnvInstall(
+        distro: LinuxDistroUi,
+        bootstrapMode: LinuxBootstrapModeUi = LinuxBootstrapModeUi.BUNDLED_OFFLINE,
+        sourcePath: String = "",
+    ): Result<ForgeProto.LinuxEnvInstallResponse> = runCatching {
+        call(
+            ForgeProto.Request.newBuilder().setLinuxEnvInstall(
+                ForgeProto.LinuxEnvInstallRequest.newBuilder()
+                    .setDistro(distro.toProto())
+                    .setBootstrapMode(bootstrapMode.toProto())
+                    .setSourcePath(sourcePath),
+            ),
+        ).linuxEnvInstall
     }
 
     fun linuxEnvUninstall(): Result<ForgeProto.LinuxEnvUninstallResponse> = runCatching {

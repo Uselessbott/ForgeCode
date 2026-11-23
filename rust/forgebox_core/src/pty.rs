@@ -8,6 +8,7 @@ use crate::error::{CoreError, Result};
 #[derive(Clone, Debug)]
 pub struct PtyConfig {
     pub shell_path: PathBuf,
+    pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
     pub cols: u16,
@@ -121,8 +122,18 @@ mod unix_impl {
 
                 let shell_c = CString::new(config.shell_path.as_os_str().as_bytes())
                     .unwrap_or_else(|_| CString::new("/system/bin/sh").unwrap());
-                let arg0 = CString::new("-sh").unwrap();
-                let mut argv = [arg0.as_ptr(), std::ptr::null()];
+                let mut cargs: Vec<CString> = Vec::new();
+                if config.args.is_empty() {
+                    cargs.push(CString::new("-sh").unwrap());
+                } else {
+                    for a in &config.args {
+                        cargs.push(
+                            CString::new(a.as_str()).unwrap_or_else(|_| CString::new("").unwrap()),
+                        );
+                    }
+                }
+                let mut argv: Vec<*const libc::c_char> = cargs.iter().map(|c| c.as_ptr()).collect();
+                argv.push(std::ptr::null());
                 libc::execv(shell_c.as_ptr(), argv.as_mut_ptr());
                 libc::_exit(127);
             }

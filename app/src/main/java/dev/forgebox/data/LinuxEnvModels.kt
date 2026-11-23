@@ -5,6 +5,7 @@ import dev.forgebox.proto.ForgeProto
 enum class LinuxEnvUiState { NOT_INSTALLED, INSTALLING, READY, FAILED }
 enum class LinuxDistroUi { DEBIAN, ALPINE }
 enum class LinuxPackageManagerUi { NPM, APT, APK }
+enum class LinuxBootstrapModeUi { BUNDLED_OFFLINE, NETWORK_DOWNLOAD }
 
 data class LinuxEnvStatusModel(
     val state: LinuxEnvUiState,
@@ -14,6 +15,9 @@ data class LinuxEnvStatusModel(
     val sizeBytes: Long,
     val pkgMgr: String,
     val message: String,
+    val rootfsPresent: Boolean = false,
+    val prootLoaderPresent: Boolean = false,
+    val shellBinary: String = "/bin/sh",
 )
 
 fun ForgeProto.LinuxEnvStatusResponse.toModel() = LinuxEnvStatusModel(
@@ -33,7 +37,15 @@ fun ForgeProto.LinuxEnvStatusResponse.toModel() = LinuxEnvStatusModel(
     sizeBytes = sizeBytes,
     pkgMgr = pkgMgr,
     message = message,
+    rootfsPresent = rootfsPresent,
+    prootLoaderPresent = prootLoaderPresent,
+    shellBinary = shellBinary.ifBlank { "/bin/sh" },
 )
+
+fun LinuxBootstrapModeUi.toProto(): ForgeProto.LinuxBootstrapMode = when (this) {
+    LinuxBootstrapModeUi.BUNDLED_OFFLINE -> ForgeProto.LinuxBootstrapMode.LINUX_BOOTSTRAP_MODE_BUNDLED_OFFLINE
+    LinuxBootstrapModeUi.NETWORK_DOWNLOAD -> ForgeProto.LinuxBootstrapMode.LINUX_BOOTSTRAP_MODE_NETWORK_DOWNLOAD
+}
 
 fun LinuxDistroUi.toProto(): ForgeProto.LinuxDistro = when (this) {
     LinuxDistroUi.ALPINE -> ForgeProto.LinuxDistro.LINUX_DISTRO_ALPINE

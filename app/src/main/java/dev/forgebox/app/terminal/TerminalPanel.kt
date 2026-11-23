@@ -103,10 +103,12 @@ fun TerminalPanel(
             Text(it, color = Color(0xFFFFAA55), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 8.dp))
         }
         if (state.hintShown) {
-            Text(
-                "M7 terminal: real /system/bin/sh + toybox. Multiple sessions, no persistence across app kill (restore recreates shell). No python/rustc/node/gcc, no apt, no PRoot/distro.",
-                color = Color(0xFFCCAA66), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 8.dp),
-            )
+            val msg = if (state.linuxEnvReady || state.sessions.any { it.shellKind == TerminalShellKind.LINUX }) {
+                "Linux shell: bundled Alpine minirootfs via PRoot (compatibility layer, not a security sandbox). Same app UID; no separate Linux user isolation. Offline bootstrap in M10.1."
+            } else {
+                "M7 terminal: real /system/bin/sh + toybox. Multiple sessions, no persistence across app kill (restore recreates shell). No python/rustc/node/gcc, no apt, no PRoot/distro."
+            }
+            Text(msg, color = Color(0xFFCCAA66), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 8.dp))
         }
 
         if (active == null) {

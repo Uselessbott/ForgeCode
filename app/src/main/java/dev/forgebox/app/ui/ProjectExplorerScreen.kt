@@ -195,9 +195,33 @@ fun ProjectExplorerScreen(
 
 
     if (showLinuxEnv) {
-        val linuxVm = remember { LinuxEnvViewModel(WorkspaceRepository(ForgeBoxRuntime), ForgeBoxRuntime) }
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val linuxVm = remember {
+            LinuxEnvViewModel(
+                repository = WorkspaceRepository(ForgeBoxRuntime),
+                runtime = ForgeBoxRuntime,
+                bundledSourceProvider = { distro -> prepareBundledLinuxAsset(context, distro) },
+            )
+        }
         LinuxEnvDialog(viewModel = linuxVm, projectId = projectId, onDismiss = { showLinuxEnv = false })
     }
+}
+
+private fun prepareBundledLinuxAsset(context: android.content.Context, distro: LinuxDistroUi): Result<String> = runCatching {
+    if (distro != LinuxDistroUi.ALPINE) error("M10.1 bundled offline install supports Alpine only. NETWORK_DOWNLOAD is M11.")
+    val arch = when (android.os.Build.SUPPORTED_ABIS.firstOrNull().orEmpty()) {
+        "arm64-v8a", "aarch64" -> "aarch64"
+        "x86_64" -> "x86_64"
+        else -> error("Unsupported ABI for bundled Alpine rootfs: ${android.os.Build.SUPPORTED_ABIS.joinToString()}")
+    }
+    val assetName = "linux/alpine-minirootfs-3.20.7-$arch.tar.gz"
+    val outDir = java.io.File(context.filesDir, "ForgeBox/Cache/linux/bootstrap")
+    if (!outDir.exists()) outDir.mkdirs()
+    val outFile = java.io.File(outDir, assetName.substringAfterLast('/'))
+    context.assets.open(assetName).use { input ->
+        outFile.outputStream().use { output -> input.copyTo(output) }
+    }
+    outFile.absolutePath
 }
 
 @Composable
@@ -210,29 +234,37 @@ private fun LinuxEnvDialog(viewModel: LinuxEnvViewModel, projectId: String, onDi
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(st.sandboxStatement, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "Compatibility layer, not a security sandbox. Processes run with the app's normal Android UID; no separate Linux user isolation.",
+                    style = MaterialTheme.typography.labelSmall,
+                )
                 val status = st.status
                 if (status != null) {
                     Text("State: ${status.state}")
+                    Text("Distro: ${status.distro ?: "-"} Arch: ${status.arch}")
+                    Text("Rootfs present: ${status.rootfsPresent}  PRoot loader: ${status.prootLoaderPresent}")
+                    Text("Shell: ${status.shellBinary}", style = MaterialTheme.typography.bodySmall)
                     if (status.rootfsPath.isNotBlank()) Text("Rootfs: ${status.rootfsPath}", style = MaterialTheme.typography.bodySmall)
-                    Text("Distro: ${status.distro ?: "-"} Arch: ${status.arch} Pkg: ${status.pkgMgr}")
                     Text("Size: ${status.sizeBytes} bytes", style = MaterialTheme.typography.bodySmall)
                     if (status.message.isNotBlank()) Text(status.message, style = MaterialTheme.typography.bodySmall)
                 } else {
                     Text(if (st.loading) "Loading..." else "No status")
                 }
-                if (st.progressMessage.isNotBlank()) Text(st.progressMessage, style = MaterialTheme.typography.bodySmall)
+                if (st.progressPercent > 0 || st.progressMessage.isNotBlank()) {
+                    Text("Progress: ${st.progressPercent}% ${st.progressMessage}", style = MaterialTheme.typography.bodySmall)
+                }
                 st.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { viewModel.install(LinuxDistroUi.ALPINE) }, enabled = !st.loading) { Text("Install Alpine") }
-                    TextButton(onClick = { viewModel.install(LinuxDistroUi.DEBIAN) }, enabled = !st.loading) { Text("Install Debian") }
+                    TextButton(onClick = { viewModel.install(LinuxDistroUi.ALPINE) }, enabled = !st.loading) { Text("Install Alpine (offline)") }
                 }
+                Text("Bundled offline bootstrap only in M10.1. Network download is deferred to M11.", style = MaterialTheme.typography.labelSmall)
                 TextButton(onClick = { viewModel.uninstall() }, enabled = !st.loading && st.status?.state == LinuxEnvUiState.READY) { Text("Uninstall") }
                 var pkg by remember { mutableStateOf("@mmmbuto/codex-cli-termux") }
                 OutlinedTextField(value = pkg, onValueChange = { pkg = it }, label = { Text("Package spec") }, singleLine = true)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { viewModel.requestPackageInstall(dev.forgebox.data.LinuxPackageManagerUi.NPM, pkg, projectId) }) { Text("npm install (PTY)") }
+                    TextButton(onClick = { viewModel.requestPackageInstall(dev.forgebox.data.LinuxPackageManagerUi.APK, pkg, projectId) }) { Text("apk add (PTY)") }
                 }
-                Text("Package install is a convenience that spawns a normal terminal command. No background package manager.", style = MaterialTheme.typography.labelSmall)
+                Text("Package install spawns a normal terminal command. Offline mode: network-required installs will fail honestly; M11 enables network bootstrap/package installs.", style = MaterialTheme.typography.labelSmall)
                 Text("No emulator runtime verification on a supported device; only API 28 emulator available (below minSdk 31).", style = MaterialTheme.typography.labelSmall)
             }
         },

@@ -447,6 +447,12 @@ enum LinuxPackageManager {
   LINUX_PACKAGE_MANAGER_APK = 3;
 }
 
+enum LinuxBootstrapMode {
+  LINUX_BOOTSTRAP_MODE_UNSPECIFIED = 0;
+  LINUX_BOOTSTRAP_MODE_BUNDLED_OFFLINE = 1;
+  LINUX_BOOTSTRAP_MODE_NETWORK_DOWNLOAD = 2;
+}
+
 message LinuxEnvStatusRequest {}
 
 message LinuxEnvStatusResponse {
@@ -457,10 +463,15 @@ message LinuxEnvStatusResponse {
   uint64 size_bytes = 5;
   string pkg_mgr = 6;
   string message = 7;
+  bool rootfs_present = 8;
+  bool proot_loader_present = 9;
+  string shell_binary = 10;
 }
 
 message LinuxEnvInstallRequest {
   LinuxDistro distro = 1;
+  LinuxBootstrapMode bootstrap_mode = 2; // default BUNDLED_OFFLINE for M10.1
+  string source_path = 3; // app-private path to bundled tar.gz copied by Kotlin
 }
 
 message LinuxEnvInstallResponse {

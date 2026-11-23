@@ -214,7 +214,44 @@ impl Runtime {
         rows: u16,
         session_cap: usize,
     ) -> Result<u64> {
-        let cwd = self.resolve_pty_cwd(project_id.as_deref())?;
+        self.pty_open_with_command(
+            project_id,
+            name,
+            env_overrides,
+            cols,
+            rows,
+            session_cap,
+            None,
+            None,
+            None,
+        )
+    }
+
+    pub fn pty_open_with_command(
+        &self,
+        project_id: Option<String>,
+        name: Option<String>,
+        env_overrides: Vec<(String, String)>,
+        cols: u16,
+        rows: u16,
+        session_cap: usize,
+        shell_path_override: Option<String>,
+        args_json: Option<String>,
+        cwd_override: Option<String>,
+    ) -> Result<u64> {
+        let cwd = if let Some(cwd_override) = cwd_override {
+            let p = PathBuf::from(cwd_override);
+            let canonical = fs::canonicalize(&p)?;
+            let projects = fs::canonicalize(self.workspace_root.join("Projects"))?;
+            if !canonical.starts_with(&projects) {
+                return Err(CoreError::InvalidArgument(
+                    "cwd outside ForgeBox/Projects".into(),
+                ));
+            }
+            canonical
+        } else {
+            self.resolve_pty_cwd(project_id.as_deref())?
+        };
         let cwd_str = cwd.to_string_lossy().into_owned();
         let now = now_millis();
         let (id, resolved_name) = {
@@ -232,12 +269,20 @@ impl Runtime {
             (id, name)
         };
 
-        let shell = PathBuf::from("/system/bin/sh");
-        let shell = if shell.exists() {
-            shell
+        let shell = if let Some(sp) = shell_path_override {
+            PathBuf::from(sp)
         } else {
-            PathBuf::from("/bin/sh")
+            let shell = PathBuf::from("/system/bin/sh");
+            if shell.exists() {
+                shell
+            } else {
+                PathBuf::from("/bin/sh")
+            }
         };
+        let args = args_json
+            .as_deref()
+            .map(serde_json_like_vec)
+            .unwrap_or_else(|| vec!["-sh".into()]);
         let mut env = vec![
             (
                 "HOME".to_string(),
@@ -263,6 +308,7 @@ impl Runtime {
         }
         let config = pty::PtyConfig {
             shell_path: shell,
+            args,
             cwd,
             env,
             cols,
@@ -1282,9 +1328,13 @@ impl Runtime {
             Some(RequestKind::LinuxEnvStatus(_)) => {
                 Ok(ResponseKind::LinuxEnvStatus(self.linux_env_status()?))
             }
-            Some(RequestKind::LinuxEnvInstall(request)) => Ok(ResponseKind::LinuxEnvInstall(
-                self.linux_env_install(request.distro())?,
-            )),
+            Some(RequestKind::LinuxEnvInstall(request)) => {
+                Ok(ResponseKind::LinuxEnvInstall(self.linux_env_install(
+                    request.distro(),
+                    request.bootstrap_mode(),
+                    request.source_path,
+                )?))
+            }
             Some(RequestKind::LinuxEnvUninstall(_)) => {
                 Ok(ResponseKind::LinuxEnvUninstall(self.linux_env_uninstall()?))
             }
@@ -1302,7 +1352,11 @@ impl Runtime {
     }
 
     fn linux_env_status(&self) -> Result<crate::proto::LinuxEnvStatusResponse> {
-        let st = crate::linux_env::LinuxEnvManager::new(&self.app_data_dir)?.status();
+        let st = crate::linux_env::LinuxEnvManager::new_with_native_lib_dir(
+            &self.app_data_dir,
+            &self.native_lib_dir,
+        )?
+        .status();
         Ok(crate::proto::LinuxEnvStatusResponse {
             state: st.state as i32,
             rootfs_path: st.rootfs_path,
@@ -1311,57 +1365,148 @@ impl Runtime {
             size_bytes: st.size_bytes,
             pkg_mgr: st.pkg_mgr,
             message: st.message,
+            rootfs_present: st.rootfs_present,
+            proot_loader_present: st.proot_loader_present,
+            shell_binary: st.shell_binary,
         })
     }
 
     fn linux_env_install(
         &self,
         distro: crate::proto::LinuxDistro,
+        bootstrap_mode: crate::proto::LinuxBootstrapMode,
+        source_path: String,
     ) -> Result<crate::proto::LinuxEnvInstallResponse> {
-        let mgr = crate::linux_env::LinuxEnvManager::new(&self.app_data_dir)?;
+        let mgr = crate::linux_env::LinuxEnvManager::new_with_native_lib_dir(
+            &self.app_data_dir,
+            &self.native_lib_dir,
+        )?;
         if matches!(distro, crate::proto::LinuxDistro::Unspecified) {
             return Err(CoreError::InvalidArgument("distro required".into()));
         }
-        mgr.mark_installing(distro)?;
+        let mode = if matches!(
+            bootstrap_mode,
+            crate::proto::LinuxBootstrapMode::Unspecified
+        ) {
+            crate::proto::LinuxBootstrapMode::BundledOffline
+        } else {
+            bootstrap_mode
+        };
+        if matches!(mode, crate::proto::LinuxBootstrapMode::NetworkDownload) {
+            let msg = "Network download bootstrap is M11; use BUNDLED_OFFLINE in M10.1".to_string();
+            mgr.mark_failed(distro, &msg)?;
+            return Ok(crate::proto::LinuxEnvInstallResponse {
+                state: crate::proto::LinuxEnvState::LinuxEnvFailed as i32,
+                progress_token: String::new(),
+                message: msg,
+            });
+        }
         let token = format!("linux-install-{}", now_millis());
-        let _ = self.emit_event_kind(EventKind::LinuxEnvInstallProgress(crate::proto::LinuxEnvInstallProgressEvent {
-            progress_token: token.clone(),
-            stage: "not_runtime_verified".into(),
-            percent: 0,
-            bytes_done: 0,
-            bytes_total: 0,
-            message: "Linux userspace install not runtime-verified on this host/device; Option B (API 28 emulator below minSdk 31).".into(),
-            state: crate::proto::LinuxEnvState::LinuxEnvInstalling as i32,
-        }));
-        mgr.mark_failed(
-            distro,
-            "Not runtime-verified on supported device (Option B: API 28 emulator below minSdk 31).",
-        )?;
-        let _ = self.emit_event_kind(EventKind::LinuxEnvInstallProgress(crate::proto::LinuxEnvInstallProgressEvent {
-            progress_token: token.clone(),
-            stage: "failed".into(),
-            percent: 100,
-            bytes_done: 0,
-            bytes_total: 0,
-            message: "Not runtime-verified on supported device (Option B: API 28 emulator below minSdk 31).".into(),
-            state: crate::proto::LinuxEnvState::LinuxEnvFailed as i32,
-        }));
-        let _ = self.audit.append(&AuditRecord {
-            ts: audit::now_iso8601(),
-            actor: "user".into(),
-            op: "linux_env_install".into(),
-            resolved_paths: vec![mgr.rootfs_path(distro).to_string_lossy().into_owned()],
-            before_hash: None,
-            after_hash: Some(format!("{:?}", distro)),
-            policy_result: "DENY".into(),
-            approval_id: None,
-            session_id: None,
-        });
-        Ok(crate::proto::LinuxEnvInstallResponse {
-            state: crate::proto::LinuxEnvState::LinuxEnvFailed as i32,
-            progress_token: token,
-            message: "Not runtime-verified on supported device (Option B: API 28 emulator below minSdk 31).".into(),
-        })
+        mgr.mark_installing(distro, "Extracting bundled Alpine rootfs...")?;
+        let _ = self.emit_event_kind(EventKind::LinuxEnvInstallProgress(
+            crate::proto::LinuxEnvInstallProgressEvent {
+                progress_token: token.clone(),
+                stage: "extracting".into(),
+                percent: 5,
+                bytes_done: 0,
+                bytes_total: 0,
+                message: "Extracting bundled Alpine rootfs...".into(),
+                state: crate::proto::LinuxEnvState::LinuxEnvInstalling as i32,
+            },
+        ));
+        let src = std::path::PathBuf::from(source_path.trim());
+        if source_path.trim().is_empty() || !src.exists() {
+            let msg = "Bundled rootfs source not found; Kotlin must copy asset to app-private path before install".to_string();
+            mgr.mark_failed(distro, &msg)?;
+            let _ = self.emit_event_kind(EventKind::LinuxEnvInstallProgress(
+                crate::proto::LinuxEnvInstallProgressEvent {
+                    progress_token: token.clone(),
+                    stage: "failed".into(),
+                    percent: 100,
+                    bytes_done: 0,
+                    bytes_total: 0,
+                    message: msg.clone(),
+                    state: crate::proto::LinuxEnvState::LinuxEnvFailed as i32,
+                },
+            ));
+            let _ = self.audit.append(&AuditRecord {
+                ts: audit::now_iso8601(),
+                actor: "user".into(),
+                op: "linux_env_install".into(),
+                resolved_paths: vec![mgr.rootfs_path(distro).to_string_lossy().into_owned()],
+                before_hash: None,
+                after_hash: Some(format!("{:?}", distro)),
+                policy_result: "DENY".into(),
+                approval_id: None,
+                session_id: None,
+            });
+            return Ok(crate::proto::LinuxEnvInstallResponse {
+                state: crate::proto::LinuxEnvState::LinuxEnvFailed as i32,
+                progress_token: token,
+                message: msg,
+            });
+        }
+        match mgr.install_bundled_offline(distro, &src) {
+            Ok(st) => {
+                let _ = self.emit_event_kind(EventKind::LinuxEnvInstallProgress(
+                    crate::proto::LinuxEnvInstallProgressEvent {
+                        progress_token: token.clone(),
+                        stage: "ready".into(),
+                        percent: 100,
+                        bytes_done: st.size_bytes,
+                        bytes_total: st.size_bytes,
+                        message: st.message.clone(),
+                        state: crate::proto::LinuxEnvState::LinuxEnvReady as i32,
+                    },
+                ));
+                let _ = self.audit.append(&AuditRecord {
+                    ts: audit::now_iso8601(),
+                    actor: "user".into(),
+                    op: "linux_env_install".into(),
+                    resolved_paths: vec![st.rootfs_path.clone()],
+                    before_hash: None,
+                    after_hash: Some(format!("{:?}", distro)),
+                    policy_result: "ALLOW".into(),
+                    approval_id: None,
+                    session_id: None,
+                });
+                Ok(crate::proto::LinuxEnvInstallResponse {
+                    state: st.state as i32,
+                    progress_token: token,
+                    message: st.message,
+                })
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let _ = self.emit_event_kind(EventKind::LinuxEnvInstallProgress(
+                    crate::proto::LinuxEnvInstallProgressEvent {
+                        progress_token: token.clone(),
+                        stage: "failed".into(),
+                        percent: 100,
+                        bytes_done: 0,
+                        bytes_total: 0,
+                        message: msg.clone(),
+                        state: crate::proto::LinuxEnvState::LinuxEnvFailed as i32,
+                    },
+                ));
+                let _ = self.audit.append(&AuditRecord {
+                    ts: audit::now_iso8601(),
+                    actor: "user".into(),
+                    op: "linux_env_install".into(),
+                    resolved_paths: vec![mgr.rootfs_path(distro).to_string_lossy().into_owned()],
+                    before_hash: None,
+                    after_hash: Some(format!("{:?}", distro)),
+                    policy_result: "DENY".into(),
+                    approval_id: None,
+                    session_id: None,
+                });
+                Ok(crate::proto::LinuxEnvInstallResponse {
+                    state: crate::proto::LinuxEnvState::LinuxEnvFailed as i32,
+                    progress_token: token,
+                    message: msg,
+                })
+            }
+        }
     }
 
     fn linux_env_uninstall(&self) -> Result<crate::proto::LinuxEnvUninstallResponse> {
@@ -1390,7 +1535,10 @@ impl Runtime {
         request: crate::proto::LinuxShellSpawnRequest,
     ) -> Result<crate::proto::LinuxShellSpawnResponse> {
         let project_dir = self.project_root_by_id(&request.project_id)?;
-        let mgr = crate::linux_env::LinuxEnvManager::new(&self.app_data_dir)?;
+        let mgr = crate::linux_env::LinuxEnvManager::new_with_native_lib_dir(
+            &self.app_data_dir,
+            &self.native_lib_dir,
+        )?;
         let st = mgr.status();
         if !matches!(st.state, crate::proto::LinuxEnvState::LinuxEnvReady) {
             return Err(CoreError::InvalidArgument(format!(
@@ -1399,18 +1547,51 @@ impl Runtime {
             )));
         }
         let guest_cwd = mgr.ensure_guest_path_mapping(&project_dir)?;
-        let env_overrides = crate::parse_env_overrides_json(&request.env_json);
-        let mut env_overrides = env_overrides;
+        let argv = mgr.build_proot_argv(Path::new(&st.rootfs_path), &project_dir, &guest_cwd);
+        let argv_json = serde_json_like_vec_encode(&argv);
+        let user_env = crate::parse_env_overrides_json(&request.env_json);
+        let mut env_overrides = Vec::new();
+        env_overrides.push(("HOME".into(), "/root".into()));
+        env_overrides.push(("TERM".into(), "xterm-256color".into()));
+        env_overrides.push((
+            "PATH".into(),
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
+        ));
+        env_overrides.push(("LANG".into(), "C.UTF-8".into()));
+        env_overrides.push((
+            "TMPDIR".into(),
+            mgr.cache_root().join("tmp").to_string_lossy().into_owned(),
+        ));
         env_overrides.push(("FORGEBOX_LINUX_ROOTFS".into(), st.rootfs_path.clone()));
-        env_overrides.push(("FORGEBOX_GUEST_CWD".into(), guest_cwd));
-        let pty_id = self.pty_open(
-            Some(request.project_id),
+        env_overrides.push(("FORGEBOX_GUEST_CWD".into(), guest_cwd.clone()));
+        for (k, v) in user_env {
+            if is_allowed_env_override(&k) {
+                env_overrides.retain(|(ek, _)| ek != &k);
+                env_overrides.push((k, v));
+            }
+        }
+        let pty_id = self.pty_open_with_command(
+            Some(request.project_id.clone()),
             Some("linux-sh".into()),
             env_overrides,
             request.cols.max(2) as u16,
             request.rows.max(2) as u16,
             12,
+            Some(argv[0].clone()),
+            Some(argv_json),
+            Some(project_dir.to_string_lossy().into_owned()),
         )?;
+        let _ = self.audit.append(&AuditRecord {
+            ts: audit::now_iso8601(),
+            actor: "user".into(),
+            op: "linux_shell_spawn".into(),
+            resolved_paths: vec![guest_cwd],
+            before_hash: None,
+            after_hash: Some(st.rootfs_path.clone()),
+            policy_result: "ALLOW".into(),
+            approval_id: None,
+            session_id: Some(pty_id.to_string()),
+        });
         Ok(crate::proto::LinuxShellSpawnResponse {
             pty_id,
             env_state: st.state as i32,
@@ -2185,6 +2366,33 @@ fn serde_json_like_vec(json: &str) -> Vec<String> {
     }
     out
 }
+
+fn serde_json_like_vec_encode(items: &[String]) -> String {
+    let inner = items
+        .iter()
+        .map(|s| {
+            let mut o = String::from("\"");
+            for c in s.chars() {
+                match c {
+                    '\\' => {
+                        o.push('\\');
+                        o.push('\\');
+                    }
+                    '"' => {
+                        o.push('\\');
+                        o.push('"');
+                    }
+                    c => o.push(c),
+                }
+            }
+            o.push('"');
+            o
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{inner}]")
+}
+
 fn hash_bytes(bytes: &[u8]) -> String {
     // Simple FNV-1a 64-bit hex for M8 audit before/after hashes (not cryptographic).
     let mut h: u64 = 14695981039346656037;
@@ -2930,6 +3138,8 @@ mod tests {
             kind: Some(RequestKind::LinuxEnvInstall(
                 crate::proto::LinuxEnvInstallRequest {
                     distro: crate::proto::LinuxDistro::Alpine as i32,
+                    bootstrap_mode: crate::proto::LinuxBootstrapMode::BundledOffline as i32,
+                    source_path: String::new(),
                 },
             )),
         };
@@ -2939,7 +3149,74 @@ mod tests {
             _ => panic!("bad"),
         };
         assert_eq!(ir.state, crate::proto::LinuxEnvState::LinuxEnvFailed as i32);
-        assert!(ir.message.contains("Option B"));
+        assert!(ir.message.contains("Bundled rootfs source not found"));
+
+        // M10.1 C1: bundled offline install with fake rootfs+loader becomes READY
+        let native = dir.path().join("native");
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::write(native.join("libproot.so"), b"proot").unwrap();
+        std::fs::write(native.join("libprootloader.so"), b"loader").unwrap();
+        std::fs::write(native.join("libprootloader32.so"), b"loader32").unwrap();
+        let mut ar = tar::Builder::new(Vec::new());
+        for (name, data, mode) in [
+            ("bin/sh", b"#!/bin/sh\n".as_slice(), 0o755u32),
+            ("etc/os-release", b"alpine".as_slice(), 0o644u32),
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_path(name).unwrap();
+            h.set_size(data.len() as u64);
+            h.set_mode(mode);
+            h.set_cksum();
+            ar.append(&h, data).unwrap();
+        }
+        let tar_bytes = ar.into_inner().unwrap();
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::copy(&mut &tar_bytes[..], &mut enc).unwrap();
+        let src = dir.path().join("alpine.tar.gz");
+        std::fs::write(&src, enc.finish().unwrap()).unwrap();
+        let runtime2 = Runtime::new(
+            dir.path().to_path_buf(),
+            native.clone(),
+            dir.path().join("db2.sqlite"),
+        )
+        .unwrap();
+        let install2 = Request {
+            id: 10,
+            kind: Some(RequestKind::LinuxEnvInstall(
+                crate::proto::LinuxEnvInstallRequest {
+                    distro: crate::proto::LinuxDistro::Alpine as i32,
+                    bootstrap_mode: crate::proto::LinuxBootstrapMode::BundledOffline as i32,
+                    source_path: src.to_string_lossy().into_owned(),
+                },
+            )),
+        };
+        let i2 = Response::decode(runtime2.call(&install2.encode_to_vec()).as_slice()).unwrap();
+        let ir2 = match i2.kind {
+            Some(ResponseKind::LinuxEnvInstall(r)) => r,
+            _ => panic!("bad"),
+        };
+        assert_eq!(ir2.state, crate::proto::LinuxEnvState::LinuxEnvReady as i32);
+        let st2 = Response::decode(
+            runtime2
+                .call(
+                    &Request {
+                        id: 11,
+                        kind: Some(RequestKind::LinuxEnvStatus(
+                            crate::proto::LinuxEnvStatusRequest {},
+                        )),
+                    }
+                    .encode_to_vec(),
+                )
+                .as_slice(),
+        )
+        .unwrap();
+        let st2 = match st2.kind {
+            Some(ResponseKind::LinuxEnvStatus(s)) => s,
+            _ => panic!("bad"),
+        };
+        assert!(st2.rootfs_present);
+        assert!(st2.proot_loader_present);
+        assert_eq!(st2.shell_binary, "/bin/sh");
 
         let un = Request {
             id: 3,
