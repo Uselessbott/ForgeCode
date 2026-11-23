@@ -38,6 +38,10 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.forgebox.data.FileEntryModel
+import dev.forgebox.data.LinuxDistroUi
+import dev.forgebox.data.LinuxEnvUiState
+import dev.forgebox.data.WorkspaceRepository
+import dev.forgebox.core.ForgeBoxRuntime
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -54,6 +58,7 @@ fun ProjectExplorerScreen(
     var actionTarget by remember { mutableStateOf<FileEntryModel?>(null) }
     var renameTarget by remember { mutableStateOf<FileEntryModel?>(null) }
     var deleteTarget by remember { mutableStateOf<FileEntryModel?>(null) }
+    var showLinuxEnv by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
 
     LaunchedEffect(projectId) { viewModel.openProject(projectId) }
@@ -75,6 +80,7 @@ fun ProjectExplorerScreen(
                     Text("Project-relative paths only. Rust VFS validates all operations.", style = MaterialTheme.typography.labelSmall)
                 }
                 TextButton(onClick = onOpenGit) { Text("Git") }
+                TextButton(onClick = { showLinuxEnv = true }) { Text("Linux") }
                 TextButton(onClick = { viewModel.refresh() }) { Text("Refresh") }
             }
 
@@ -186,5 +192,50 @@ fun ProjectExplorerScreen(
             },
         )
     }
+
+
+    if (showLinuxEnv) {
+        val linuxVm = remember { LinuxEnvViewModel(WorkspaceRepository(ForgeBoxRuntime), ForgeBoxRuntime) }
+        LinuxEnvDialog(viewModel = linuxVm, projectId = projectId, onDismiss = { showLinuxEnv = false })
+    }
 }
 
+@Composable
+private fun LinuxEnvDialog(viewModel: LinuxEnvViewModel, projectId: String, onDismiss: () -> Unit) {
+    val st by viewModel.state.collectAsState()
+    LaunchedEffect(Unit) { viewModel.refresh() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Linux environment") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(st.sandboxStatement, style = MaterialTheme.typography.bodySmall)
+                val status = st.status
+                if (status != null) {
+                    Text("State: ${status.state}")
+                    if (status.rootfsPath.isNotBlank()) Text("Rootfs: ${status.rootfsPath}", style = MaterialTheme.typography.bodySmall)
+                    Text("Distro: ${status.distro ?: "-"} Arch: ${status.arch} Pkg: ${status.pkgMgr}")
+                    Text("Size: ${status.sizeBytes} bytes", style = MaterialTheme.typography.bodySmall)
+                    if (status.message.isNotBlank()) Text(status.message, style = MaterialTheme.typography.bodySmall)
+                } else {
+                    Text(if (st.loading) "Loading..." else "No status")
+                }
+                if (st.progressMessage.isNotBlank()) Text(st.progressMessage, style = MaterialTheme.typography.bodySmall)
+                st.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { viewModel.install(LinuxDistroUi.ALPINE) }, enabled = !st.loading) { Text("Install Alpine") }
+                    TextButton(onClick = { viewModel.install(LinuxDistroUi.DEBIAN) }, enabled = !st.loading) { Text("Install Debian") }
+                }
+                TextButton(onClick = { viewModel.uninstall() }, enabled = !st.loading && st.status?.state == LinuxEnvUiState.READY) { Text("Uninstall") }
+                var pkg by remember { mutableStateOf("@mmmbuto/codex-cli-termux") }
+                OutlinedTextField(value = pkg, onValueChange = { pkg = it }, label = { Text("Package spec") }, singleLine = true)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { viewModel.requestPackageInstall(dev.forgebox.data.LinuxPackageManagerUi.NPM, pkg, projectId) }) { Text("npm install (PTY)") }
+                }
+                Text("Package install is a convenience that spawns a normal terminal command. No background package manager.", style = MaterialTheme.typography.labelSmall)
+                Text("No emulator runtime verification on a supported device; only API 28 emulator available (below minSdk 31).", style = MaterialTheme.typography.labelSmall)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}

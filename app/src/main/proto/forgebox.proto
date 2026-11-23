@@ -1,4 +1,4 @@
-syntax = "proto3";
+﻿syntax = "proto3";
 
 package forgebox.v1;
 
@@ -50,6 +50,12 @@ message Request {
     GitAuthStorePatRequest git_auth_store_pat = 37;
     GitAuthRevokeRequest git_auth_revoke = 38;
     GitCredentialForRemoteRequest git_credential_for_remote = 39;
+    LinuxEnvStatusRequest linux_env_status = 40;
+    LinuxEnvInstallRequest linux_env_install = 41;
+    LinuxEnvUninstallRequest linux_env_uninstall = 42;
+    LinuxShellSpawnRequest linux_shell_spawn = 43;
+    LinuxPackageInstallRequest linux_package_install = 44;
+    LinuxRunInstalledBinaryRequest linux_run_installed_binary = 45;
   }
 }
 
@@ -96,6 +102,12 @@ message Response {
     GitAuthStorePatResponse git_auth_store_pat = 39;
     GitAuthRevokeResponse git_auth_revoke = 40;
     GitCredentialForRemoteResponse git_credential_for_remote = 41;
+    LinuxEnvStatusResponse linux_env_status = 42;
+    LinuxEnvInstallResponse linux_env_install = 43;
+    LinuxEnvUninstallResponse linux_env_uninstall = 44;
+    LinuxShellSpawnResponse linux_shell_spawn = 45;
+    LinuxPackageInstallResponse linux_package_install = 46;
+    LinuxRunInstalledBinaryResponse linux_run_installed_binary = 47;
   }
 }
 
@@ -269,6 +281,7 @@ message Event {
     TerminalSessionRenamedEvent terminal_session_renamed = 10;
     TerminalSessionStateEvent terminal_session_state = 11;
     TerminalSessionRestoreAvailableEvent terminal_session_restore_available = 12;
+    LinuxEnvInstallProgressEvent linux_env_install_progress = 13;
   }
 }
 
@@ -337,7 +350,13 @@ message RenameTerminalSessionResponse { TerminalSessionDescriptor session = 1; }
 message StopAllTerminalSessionsRequest {}
 message StopAllTerminalSessionsResponse { uint32 stopped = 1; }
 
-message EvaluateCommandRequest { string command = 1; bool actor_is_agent = 2; string session_id = 3; string cwd = 4; }
+enum CommandOrigin {
+  COMMAND_ORIGIN_UNSPECIFIED = 0;
+  COMMAND_ORIGIN_USER = 1;
+  COMMAND_ORIGIN_INSTALLED_BINARY = 2;
+}
+
+message EvaluateCommandRequest { string command = 1; bool actor_is_agent = 2; string session_id = 3; string cwd = 4; CommandOrigin origin = 5; }
 message EvaluateCommandResponse {
   string decision = 1; // ALLOW|CONFIRM|DENY
   string reason = 2;
@@ -404,3 +423,102 @@ message GitAuthRevokeRequest { string provider = 1; }
 message GitAuthRevokeResponse { bool ok = 1; }
 message GitCredentialForRemoteRequest { string project_id = 1; string remote_url = 2; string operation = 3; string provider = 4; }
 message GitCredentialForRemoteResponse { string credential_handle = 1; int64 expires_at = 2; }
+
+// ==================== M10 Linux Userspace ====================
+
+enum LinuxEnvState {
+  LINUX_ENV_STATE_UNSPECIFIED = 0;
+  LINUX_ENV_NOT_INSTALLED = 1;
+  LINUX_ENV_INSTALLING = 2;
+  LINUX_ENV_READY = 3;
+  LINUX_ENV_FAILED = 4;
+}
+
+enum LinuxDistro {
+  LINUX_DISTRO_UNSPECIFIED = 0;
+  LINUX_DISTRO_DEBIAN = 1;
+  LINUX_DISTRO_ALPINE = 2;
+}
+
+enum LinuxPackageManager {
+  LINUX_PACKAGE_MANAGER_UNSPECIFIED = 0;
+  LINUX_PACKAGE_MANAGER_NPM = 1;
+  LINUX_PACKAGE_MANAGER_APT = 2;
+  LINUX_PACKAGE_MANAGER_APK = 3;
+}
+
+message LinuxEnvStatusRequest {}
+
+message LinuxEnvStatusResponse {
+  LinuxEnvState state = 1;
+  string rootfs_path = 2;
+  LinuxDistro distro = 3;
+  string arch = 4;
+  uint64 size_bytes = 5;
+  string pkg_mgr = 6;
+  string message = 7;
+}
+
+message LinuxEnvInstallRequest {
+  LinuxDistro distro = 1;
+}
+
+message LinuxEnvInstallResponse {
+  LinuxEnvState state = 1;
+  string progress_token = 2;
+  string message = 3;
+}
+
+message LinuxEnvInstallProgressEvent {
+  string progress_token = 1;
+  string stage = 2;
+  uint32 percent = 3;
+  uint64 bytes_done = 4;
+  uint64 bytes_total = 5;
+  string message = 6;
+  LinuxEnvState state = 7;
+}
+
+message LinuxEnvUninstallRequest {}
+message LinuxEnvUninstallResponse {
+  bool ok = 1;
+  LinuxEnvState state = 2;
+  string message = 3;
+}
+
+message LinuxShellSpawnRequest {
+  string project_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+  string env_json = 4;
+}
+
+message LinuxShellSpawnResponse {
+  uint64 pty_id = 1;
+  LinuxEnvState env_state = 2;
+}
+
+message LinuxPackageInstallRequest {
+  LinuxPackageManager manager = 1;
+  string package_spec = 2;
+  string cwd_project_id = 3;
+}
+
+message LinuxPackageInstallResponse {
+  uint64 pty_id = 1;
+  string command = 2;
+}
+
+message LinuxRunInstalledBinaryRequest {
+  string project_id = 1;
+  string binary_name = 2;
+  string argv_json = 3;
+  string approval_token = 4;
+  string command_hash = 5;
+  string session_id = 6;
+}
+
+message LinuxRunInstalledBinaryResponse {
+  uint64 pty_id = 1;
+  string command = 2;
+}

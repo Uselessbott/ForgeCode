@@ -16,6 +16,7 @@ data class TerminalRenderState(
 )
 
 enum class TerminalSessionLifecycle { STARTING, RUNNING, EXITED, STOPPED, CRASHED, RESTORABLE }
+enum class TerminalShellKind { BIONIC, LINUX }
 
 data class TerminalSessionUi(
     val ptyId: Long,
@@ -29,6 +30,7 @@ data class TerminalSessionUi(
     val restorable: Boolean = false,
     val scrollbackNotice: String? = null,
     val envOverridesJson: String = "{}",
+    val shellKind: TerminalShellKind = TerminalShellKind.BIONIC,
 )
 
 data class TerminalPendingApproval(
@@ -53,4 +55,6 @@ data class TerminalUiState(
     val hintShown: Boolean = false,
     val restoreBanner: String? = null,
     val pendingApproval: TerminalPendingApproval? = null,
+    val linuxEnvReady: Boolean = false,
+    val preferredShellKind: TerminalShellKind = TerminalShellKind.BIONIC,
 )

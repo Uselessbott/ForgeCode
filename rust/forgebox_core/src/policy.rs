@@ -16,6 +16,12 @@ pub enum PolicyDecision {
     Deny,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandOrigin {
+    User,
+    InstalledBinary,
+}
+
 #[derive(Clone, Debug)]
 pub struct PolicyAssessment {
     pub decision: PolicyDecision,
@@ -111,6 +117,22 @@ pub fn evaluate_command(
     session_id: &str,
     cwd: &str,
 ) -> PolicyAssessment {
+    evaluate_command_with_origin(
+        command,
+        actor_is_agent,
+        session_id,
+        cwd,
+        CommandOrigin::User,
+    )
+}
+
+pub fn evaluate_command_with_origin(
+    command: &str,
+    actor_is_agent: bool,
+    session_id: &str,
+    cwd: &str,
+    origin: CommandOrigin,
+) -> PolicyAssessment {
     let normalized = command.trim().to_string();
     let tokens = shell_words(&normalized);
     let argv = tokens.clone();
@@ -127,7 +149,14 @@ pub fn evaluate_command(
     let mut creates_checkpoint = false;
     let mut classification = "allow".to_string();
 
-    if unknown {
+    if matches!(origin, CommandOrigin::InstalledBinary) {
+        decision = PolicyDecision::Confirm;
+        classification = "installed_binary".into();
+        reason =
+            "This binary was installed in the Linux environment and is about to run. Continue?"
+                .into();
+        creates_checkpoint = true;
+    } else if unknown {
         if actor_is_agent {
             decision = PolicyDecision::Deny;
             classification = "agent_unknown".into();
@@ -653,6 +682,32 @@ mod tests {
         assert_eq!(b.decision, PolicyDecision::Confirm);
         assert!(consume_approval_token("aptok_aaaaaaaa_1", &b.command_hash, "s1").is_err());
     }
+
+    #[test]
+    fn installed_binary_origin_requires_confirm() {
+        let a = evaluate_command_with_origin(
+            "codex --version",
+            false,
+            "s1",
+            "/p",
+            CommandOrigin::InstalledBinary,
+        );
+        assert_eq!(a.decision, PolicyDecision::Confirm);
+        assert_eq!(a.classification, "installed_binary");
+        assert!(a.reason.contains("installed in the Linux environment"));
+    }
+
+    #[test]
+    fn user_package_install_allow_unless_other_rule() {
+        let a = evaluate_command(
+            "npm install -g @mmmbuto/codex-cli-termux",
+            false,
+            "s1",
+            "/p",
+        );
+        assert_eq!(a.decision, PolicyDecision::Allow);
+    }
+
     #[test]
     fn full_confirm_set_samples() {
         let cases = [

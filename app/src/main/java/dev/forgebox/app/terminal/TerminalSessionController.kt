@@ -84,11 +84,13 @@ object TerminalSessionController {
 
     fun open(context: Context, projectId: String?) {
         val cap = sessionCapFor(context)
-        _state.value = _state.value.copy(open = true, projectId = projectId, sessionCap = cap, hintShown = true)
+        val linuxReady = runCatching { ForgeBoxRuntime.call(ForgeProto.Request.newBuilder().setLinuxEnvStatus(ForgeProto.LinuxEnvStatusRequest.getDefaultInstance()).build()).linuxEnvStatus.state == ForgeProto.LinuxEnvState.LINUX_ENV_READY }.getOrDefault(false)
+        val preferred = if (linuxReady) TerminalShellKind.LINUX else TerminalShellKind.BIONIC
+        _state.value = _state.value.copy(open = true, projectId = projectId, sessionCap = cap, hintShown = true, linuxEnvReady = linuxReady, preferredShellKind = preferred)
         startPolling()
         refreshSessions()
         if (_state.value.sessions.none { it.lifecycle == TerminalSessionLifecycle.RUNNING || it.lifecycle == TerminalSessionLifecycle.STARTING }) {
-            createSession(projectId)
+            createSession(projectId, preferred)
         }
     }
 
@@ -100,7 +102,7 @@ object TerminalSessionController {
 
     fun activeSession(): TerminalSessionUi? = _state.value.sessions.firstOrNull { it.ptyId == _state.value.activePtyId }
 
-    fun createSession(projectId: String? = _state.value.projectId) {
+    fun createSession(projectId: String? = _state.value.projectId, shellKind: TerminalShellKind = _state.value.preferredShellKind) {
         scope.launch {
             opMutex.withLock {
                 val st = _state.value
@@ -109,19 +111,28 @@ object TerminalSessionController {
                     _state.value = st.copy(status = "Session cap reached (${st.sessionCap}). Close a session first.")
                     return@withLock
                 }
-                runCatching { backend.ptyOpen(projectId, 80, 24, null, "{}", st.sessionCap) }
+                val effectiveKind = if (shellKind == TerminalShellKind.LINUX && !st.linuxEnvReady) TerminalShellKind.BIONIC else shellKind
+                val openResult = runCatching {
+                    if (effectiveKind == TerminalShellKind.LINUX) {
+                        val pid = projectId ?: return@runCatching -1L
+                        val resp = backend.call(ForgeProto.Request.newBuilder().setLinuxShellSpawn(ForgeProto.LinuxShellSpawnRequest.newBuilder().setProjectId(pid).setCols(80).setRows(24).setEnvJson("{}")).build())
+                        if (resp.status != ForgeProto.Status.OK) error(resp.error.message) else resp.linuxShellSpawn.ptyId
+                    } else backend.ptyOpen(projectId, 80, 24, null, "{}", st.sessionCap)
+                }
+                openResult
                     .onSuccess { id ->
-                        val ui = TerminalSessionUi(ptyId = id, name = "sh", cwd = "", cwdLabel = projectId ?: "ForgeBox", lifecycle = TerminalSessionLifecycle.RUNNING, envOverridesJson = "{}")
-                        _state.value = _state.value.copy(
-                            sessions = st.sessions.filterNot { it.ptyId == id } + ui,
-                            activePtyId = id,
-                            status = "running",
-                        )
+                        if (id <= 0L) { _state.value = _state.value.copy(status = "Project required for Linux shell"); return@withLock }
+                        val ui = TerminalSessionUi(ptyId = id, name = if (effectiveKind == TerminalShellKind.LINUX) "linux-sh" else "sh", cwd = "", cwdLabel = projectId ?: "ForgeBox", lifecycle = TerminalSessionLifecycle.RUNNING, envOverridesJson = "{}", shellKind = effectiveKind)
+                        _state.value = _state.value.copy(sessions = st.sessions.filterNot { it.ptyId == id } + ui, activePtyId = id, status = "running")
                         refreshSessions()
                     }
                     .onFailure { e -> _state.value = _state.value.copy(status = e.message ?: "Failed to open session") }
             }
         }
+    }
+
+    fun setPreferredShellKind(kind: TerminalShellKind) {
+        _state.value = _state.value.copy(preferredShellKind = if (kind == TerminalShellKind.LINUX && !_state.value.linuxEnvReady) TerminalShellKind.BIONIC else kind)
     }
 
     fun select(ptyId: Long) { _state.value = _state.value.copy(activePtyId = ptyId) }
@@ -151,7 +162,8 @@ object TerminalSessionController {
                             ForgeProto.Request.newBuilder()
                                 .setEvaluateCommand(
                                     ForgeProto.EvaluateCommandRequest.newBuilder()
-                                        .setCommand(cmd).setActorIsAgent(false).setSessionId(id.toString()).setCwd(cwd).build()
+                                        .setCommand(cmd).setActorIsAgent(false).setSessionId(id.toString()).setCwd(cwd)
+                                        .setOrigin(ForgeProto.CommandOrigin.COMMAND_ORIGIN_USER).build()
                                 ).build()
                         )
                     }.getOrNull()

@@ -231,6 +231,30 @@ class WorkspaceRepository(
         Unit
     }
 
+    fun linuxEnvStatus(): Result<LinuxEnvStatusModel> = runCatching {
+        call(ForgeProto.Request.newBuilder().setLinuxEnvStatus(ForgeProto.LinuxEnvStatusRequest.getDefaultInstance())).linuxEnvStatus.toModel()
+    }
+
+    fun linuxEnvInstall(distro: LinuxDistroUi): Result<ForgeProto.LinuxEnvInstallResponse> = runCatching {
+        call(ForgeProto.Request.newBuilder().setLinuxEnvInstall(ForgeProto.LinuxEnvInstallRequest.newBuilder().setDistro(distro.toProto()))).linuxEnvInstall
+    }
+
+    fun linuxEnvUninstall(): Result<ForgeProto.LinuxEnvUninstallResponse> = runCatching {
+        call(ForgeProto.Request.newBuilder().setLinuxEnvUninstall(ForgeProto.LinuxEnvUninstallRequest.getDefaultInstance())).linuxEnvUninstall
+    }
+
+    fun linuxShellSpawn(projectId: String, cols: Int, rows: Int, envJson: String = "{}"): Result<Long> = runCatching {
+        call(ForgeProto.Request.newBuilder().setLinuxShellSpawn(ForgeProto.LinuxShellSpawnRequest.newBuilder().setProjectId(projectId).setCols(cols).setRows(rows).setEnvJson(envJson))).linuxShellSpawn.ptyId
+    }
+
+    fun linuxPackageInstall(manager: LinuxPackageManagerUi, packageSpec: String, cwdProjectId: String): Result<ForgeProto.LinuxPackageInstallResponse> = runCatching {
+        call(ForgeProto.Request.newBuilder().setLinuxPackageInstall(ForgeProto.LinuxPackageInstallRequest.newBuilder().setManager(manager.toProto()).setPackageSpec(packageSpec).setCwdProjectId(cwdProjectId))).linuxPackageInstall
+    }
+
+    fun linuxRunInstalledBinary(projectId: String, binaryName: String, argvJson: String, approvalToken: String, commandHash: String, sessionId: String): Result<ForgeProto.LinuxRunInstalledBinaryResponse> = runCatching {
+        call(ForgeProto.Request.newBuilder().setLinuxRunInstalledBinary(ForgeProto.LinuxRunInstalledBinaryRequest.newBuilder().setProjectId(projectId).setBinaryName(binaryName).setArgvJson(argvJson).setApprovalToken(approvalToken).setCommandHash(commandHash).setSessionId(sessionId))).linuxRunInstalledBinary
+    }
+
     private fun call(builder: ForgeProto.Request.Builder): ForgeProto.Response {
         val request = builder.setId(ids.getAndIncrement()).build()
         val response = core.call(request)

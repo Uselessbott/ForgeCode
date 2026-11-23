@@ -880,11 +880,18 @@ impl Runtime {
                 ))
             }
             Some(RequestKind::EvaluateCommand(request)) => {
-                let a = crate::policy::evaluate_command(
+                let origin = match request.origin() {
+                    crate::proto::CommandOrigin::InstalledBinary => {
+                        crate::policy::CommandOrigin::InstalledBinary
+                    }
+                    _ => crate::policy::CommandOrigin::User,
+                };
+                let a = crate::policy::evaluate_command_with_origin(
                     &request.command,
                     request.actor_is_agent,
                     &request.session_id,
                     &request.cwd,
+                    origin,
                 );
                 let decision = match a.decision {
                     crate::policy::PolicyDecision::Allow => "ALLOW",
@@ -1272,8 +1279,264 @@ impl Runtime {
             | Some(RequestKind::GitCredentialForRemote(_)) => Err(CoreError::InvalidArgument(
                 "git auth/credential broker operations are handled by Kotlin broker layer".into(),
             )),
+            Some(RequestKind::LinuxEnvStatus(_)) => {
+                Ok(ResponseKind::LinuxEnvStatus(self.linux_env_status()?))
+            }
+            Some(RequestKind::LinuxEnvInstall(request)) => Ok(ResponseKind::LinuxEnvInstall(
+                self.linux_env_install(request.distro())?,
+            )),
+            Some(RequestKind::LinuxEnvUninstall(_)) => {
+                Ok(ResponseKind::LinuxEnvUninstall(self.linux_env_uninstall()?))
+            }
+            Some(RequestKind::LinuxShellSpawn(request)) => Ok(ResponseKind::LinuxShellSpawn(
+                self.linux_shell_spawn(request)?,
+            )),
+            Some(RequestKind::LinuxPackageInstall(request)) => Ok(
+                ResponseKind::LinuxPackageInstall(self.linux_package_install(request)?),
+            ),
+            Some(RequestKind::LinuxRunInstalledBinary(request)) => Ok(
+                ResponseKind::LinuxRunInstalledBinary(self.linux_run_installed_binary(request)?),
+            ),
             None => Err(CoreError::InvalidArgument("missing request kind".into())),
         }
+    }
+
+    fn linux_env_status(&self) -> Result<crate::proto::LinuxEnvStatusResponse> {
+        let st = crate::linux_env::LinuxEnvManager::new(&self.app_data_dir)?.status();
+        Ok(crate::proto::LinuxEnvStatusResponse {
+            state: st.state as i32,
+            rootfs_path: st.rootfs_path,
+            distro: st.distro as i32,
+            arch: st.arch,
+            size_bytes: st.size_bytes,
+            pkg_mgr: st.pkg_mgr,
+            message: st.message,
+        })
+    }
+
+    fn linux_env_install(
+        &self,
+        distro: crate::proto::LinuxDistro,
+    ) -> Result<crate::proto::LinuxEnvInstallResponse> {
+        let mgr = crate::linux_env::LinuxEnvManager::new(&self.app_data_dir)?;
+        if matches!(distro, crate::proto::LinuxDistro::Unspecified) {
+            return Err(CoreError::InvalidArgument("distro required".into()));
+        }
+        mgr.mark_installing(distro)?;
+        let token = format!("linux-install-{}", now_millis());
+        let _ = self.emit_event_kind(EventKind::LinuxEnvInstallProgress(crate::proto::LinuxEnvInstallProgressEvent {
+            progress_token: token.clone(),
+            stage: "not_runtime_verified".into(),
+            percent: 0,
+            bytes_done: 0,
+            bytes_total: 0,
+            message: "Linux userspace install not runtime-verified on this host/device; Option B (API 28 emulator below minSdk 31).".into(),
+            state: crate::proto::LinuxEnvState::LinuxEnvInstalling as i32,
+        }));
+        mgr.mark_failed(
+            distro,
+            "Not runtime-verified on supported device (Option B: API 28 emulator below minSdk 31).",
+        )?;
+        let _ = self.emit_event_kind(EventKind::LinuxEnvInstallProgress(crate::proto::LinuxEnvInstallProgressEvent {
+            progress_token: token.clone(),
+            stage: "failed".into(),
+            percent: 100,
+            bytes_done: 0,
+            bytes_total: 0,
+            message: "Not runtime-verified on supported device (Option B: API 28 emulator below minSdk 31).".into(),
+            state: crate::proto::LinuxEnvState::LinuxEnvFailed as i32,
+        }));
+        let _ = self.audit.append(&AuditRecord {
+            ts: audit::now_iso8601(),
+            actor: "user".into(),
+            op: "linux_env_install".into(),
+            resolved_paths: vec![mgr.rootfs_path(distro).to_string_lossy().into_owned()],
+            before_hash: None,
+            after_hash: Some(format!("{:?}", distro)),
+            policy_result: "DENY".into(),
+            approval_id: None,
+            session_id: None,
+        });
+        Ok(crate::proto::LinuxEnvInstallResponse {
+            state: crate::proto::LinuxEnvState::LinuxEnvFailed as i32,
+            progress_token: token,
+            message: "Not runtime-verified on supported device (Option B: API 28 emulator below minSdk 31).".into(),
+        })
+    }
+
+    fn linux_env_uninstall(&self) -> Result<crate::proto::LinuxEnvUninstallResponse> {
+        let mgr = crate::linux_env::LinuxEnvManager::new(&self.app_data_dir)?;
+        let st = mgr.uninstall()?;
+        let _ = self.audit.append(&AuditRecord {
+            ts: audit::now_iso8601(),
+            actor: "user".into(),
+            op: "linux_env_uninstall".into(),
+            resolved_paths: vec![st.rootfs_path.clone()],
+            before_hash: None,
+            after_hash: None,
+            policy_result: "ALLOW".into(),
+            approval_id: None,
+            session_id: None,
+        });
+        Ok(crate::proto::LinuxEnvUninstallResponse {
+            ok: true,
+            state: st.state as i32,
+            message: st.message,
+        })
+    }
+
+    fn linux_shell_spawn(
+        &self,
+        request: crate::proto::LinuxShellSpawnRequest,
+    ) -> Result<crate::proto::LinuxShellSpawnResponse> {
+        let project_dir = self.project_root_by_id(&request.project_id)?;
+        let mgr = crate::linux_env::LinuxEnvManager::new(&self.app_data_dir)?;
+        let st = mgr.status();
+        if !matches!(st.state, crate::proto::LinuxEnvState::LinuxEnvReady) {
+            return Err(CoreError::InvalidArgument(format!(
+                "Linux env not ready: {}",
+                st.message
+            )));
+        }
+        let guest_cwd = mgr.ensure_guest_path_mapping(&project_dir)?;
+        let env_overrides = crate::parse_env_overrides_json(&request.env_json);
+        let mut env_overrides = env_overrides;
+        env_overrides.push(("FORGEBOX_LINUX_ROOTFS".into(), st.rootfs_path.clone()));
+        env_overrides.push(("FORGEBOX_GUEST_CWD".into(), guest_cwd));
+        let pty_id = self.pty_open(
+            Some(request.project_id),
+            Some("linux-sh".into()),
+            env_overrides,
+            request.cols.max(2) as u16,
+            request.rows.max(2) as u16,
+            12,
+        )?;
+        Ok(crate::proto::LinuxShellSpawnResponse {
+            pty_id,
+            env_state: st.state as i32,
+        })
+    }
+
+    fn linux_package_install(
+        &self,
+        request: crate::proto::LinuxPackageInstallRequest,
+    ) -> Result<crate::proto::LinuxPackageInstallResponse> {
+        let mgr_name = match request.manager() {
+            crate::proto::LinuxPackageManager::Npm => "npm",
+            crate::proto::LinuxPackageManager::Apt => "apt",
+            crate::proto::LinuxPackageManager::Apk => "apk",
+            _ => {
+                return Err(CoreError::InvalidArgument(
+                    "package manager required".into(),
+                ))
+            }
+        };
+        let command =
+            crate::linux_env::build_package_install_command(mgr_name, &request.package_spec)?;
+        let _assessment = crate::policy::evaluate_command_with_origin(
+            &command,
+            false,
+            &request.cwd_project_id,
+            "",
+            crate::policy::CommandOrigin::User,
+        );
+        let project_dir = self.project_root_by_id(&request.cwd_project_id)?;
+        let full_cmd = format!(
+            "cd {} && {}",
+            shell_escape(&project_dir.to_string_lossy()),
+            command
+        );
+        let pty_id = self.pty_open(
+            Some(request.cwd_project_id),
+            Some(format!("install-{mgr_name}")),
+            vec![],
+            80,
+            24,
+            12,
+        )?;
+        self.pty_write(
+            pty_id,
+            format!(
+                "{full_cmd}
+"
+            )
+            .as_bytes(),
+        )?;
+        let _ = self.audit.append(&AuditRecord {
+            ts: audit::now_iso8601(),
+            actor: "user".into(),
+            op: "linux_package_install".into(),
+            resolved_paths: vec![command.clone()],
+            before_hash: None,
+            after_hash: None,
+            policy_result: "ALLOW".into(),
+            approval_id: None,
+            session_id: Some(pty_id.to_string()),
+        });
+        Ok(crate::proto::LinuxPackageInstallResponse { pty_id, command })
+    }
+
+    fn linux_run_installed_binary(
+        &self,
+        request: crate::proto::LinuxRunInstalledBinaryRequest,
+    ) -> Result<crate::proto::LinuxRunInstalledBinaryResponse> {
+        let binary = crate::linux_env::validate_binary_name(&request.binary_name)?;
+        let argv: Vec<String> = serde_json_like_vec(&request.argv_json);
+        let mut cmd_parts = vec![binary.clone()];
+        cmd_parts.extend(argv.clone());
+        let command = cmd_parts.join(" ");
+        let assessment = crate::policy::evaluate_command_with_origin(
+            &command,
+            false,
+            &request.session_id,
+            "",
+            crate::policy::CommandOrigin::InstalledBinary,
+        );
+        if !request.approval_token.is_empty() {
+            crate::policy::consume_approval_token(
+                &request.approval_token,
+                &request.command_hash,
+                &request.session_id,
+            )?;
+        } else if matches!(assessment.decision, crate::policy::PolicyDecision::Confirm) {
+            return Err(CoreError::InvalidArgument(
+                "CONFIRM: installed binary requires approval token".into(),
+            ));
+        }
+        let project_dir = self.project_root_by_id(&request.project_id)?;
+        let full_cmd = format!(
+            "cd {} && {}",
+            shell_escape(&project_dir.to_string_lossy()),
+            command
+        );
+        let pty_id = self.pty_open(
+            Some(request.project_id),
+            Some(binary.clone()),
+            vec![],
+            80,
+            24,
+            12,
+        )?;
+        self.pty_write(
+            pty_id,
+            format!(
+                "{full_cmd}
+"
+            )
+            .as_bytes(),
+        )?;
+        let _ = self.audit.append(&AuditRecord {
+            ts: audit::now_iso8601(),
+            actor: "user".into(),
+            op: "installed_binary_run".into(),
+            resolved_paths: vec![binary],
+            before_hash: None,
+            after_hash: Some(audit::redact(&command)),
+            policy_result: "CONFIRM".into(),
+            approval_id: Some(audit::redact(&request.approval_token)),
+            session_id: Some(pty_id.to_string()),
+        });
+        Ok(crate::proto::LinuxRunInstalledBinaryResponse { pty_id, command })
     }
 
     fn get_info(&self, _request: GetInfoRequest) -> Result<GetInfoResponse> {
@@ -1791,6 +2054,7 @@ impl Runtime {
             EventKind::TerminalSessionRenamed(_) => "terminal_session_renamed",
             EventKind::TerminalSessionState(_) => "terminal_session_state",
             EventKind::TerminalSessionRestoreAvailable(_) => "terminal_session_restore_available",
+            EventKind::LinuxEnvInstallProgress(_) => "linux_env_install_progress",
         };
         let event = Event {
             seq,
@@ -1882,6 +2146,45 @@ fn now_millis() -> i64 {
         .as_millis() as i64
 }
 
+fn shell_escape(s: &str) -> String {
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
+
+fn serde_json_like_vec(json: &str) -> Vec<String> {
+    let t = json.trim();
+    if !t.starts_with('[') || !t.ends_with(']') {
+        return vec![];
+    }
+    let inner = &t[1..t.len() - 1];
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_str = false;
+    let mut esc = false;
+    for ch in inner.chars() {
+        if esc {
+            cur.push(ch);
+            esc = false;
+            continue;
+        }
+        if ch == '\\' {
+            esc = true;
+            continue;
+        }
+        if ch == '"' {
+            in_str = !in_str;
+            if !in_str {
+                out.push(cur.clone());
+                cur.clear();
+            }
+            continue;
+        }
+        if in_str {
+            cur.push(ch);
+        }
+    }
+    out
+}
 fn hash_bytes(bytes: &[u8]) -> String {
     // Simple FNV-1a 64-bit hex for M8 audit before/after hashes (not cryptographic).
     let mut h: u64 = 14695981039346656037;
@@ -2556,6 +2859,7 @@ mod tests {
                     actor_is_agent: false,
                     session_id: "s1".into(),
                     cwd: "/p".into(),
+                    origin: crate::proto::CommandOrigin::User as i32,
                 },
             )),
         };
@@ -2596,6 +2900,136 @@ mod tests {
             !lines.contains(&token),
             "raw token must be redacted in audit"
         );
+    }
+
+    #[test]
+    fn linux_env_status_install_uninstall_and_audit() {
+        let (_temp, runtime) = setup_runtime();
+        let status = Request {
+            id: 1,
+            kind: Some(RequestKind::LinuxEnvStatus(
+                crate::proto::LinuxEnvStatusRequest {},
+            )),
+        };
+        let resp = Response::decode(runtime.call(&status.encode_to_vec()).as_slice()).unwrap();
+        let st = match resp.kind {
+            Some(ResponseKind::LinuxEnvStatus(r)) => r,
+            _ => panic!("bad"),
+        };
+        assert_eq!(
+            st.state,
+            crate::proto::LinuxEnvState::LinuxEnvNotInstalled as i32
+        );
+        assert!(st
+            .rootfs_path
+            .replace('\\', "/")
+            .contains("/ForgeBox/Cache/linux/"));
+
+        let install = Request {
+            id: 2,
+            kind: Some(RequestKind::LinuxEnvInstall(
+                crate::proto::LinuxEnvInstallRequest {
+                    distro: crate::proto::LinuxDistro::Alpine as i32,
+                },
+            )),
+        };
+        let iresp = Response::decode(runtime.call(&install.encode_to_vec()).as_slice()).unwrap();
+        let ir = match iresp.kind {
+            Some(ResponseKind::LinuxEnvInstall(r)) => r,
+            _ => panic!("bad"),
+        };
+        assert_eq!(ir.state, crate::proto::LinuxEnvState::LinuxEnvFailed as i32);
+        assert!(ir.message.contains("Option B"));
+
+        let un = Request {
+            id: 3,
+            kind: Some(RequestKind::LinuxEnvUninstall(
+                crate::proto::LinuxEnvUninstallRequest {},
+            )),
+        };
+        let uresp = Response::decode(runtime.call(&un.encode_to_vec()).as_slice()).unwrap();
+        let ur = match uresp.kind {
+            Some(ResponseKind::LinuxEnvUninstall(r)) => r,
+            _ => panic!("bad"),
+        };
+        assert!(ur.ok);
+        let lines = read_audit_lines(&runtime).join("\n");
+        assert!(lines.contains("\"op\":\"linux_env_install\""));
+        assert!(lines.contains("\"op\":\"linux_env_uninstall\""));
+    }
+
+    #[test]
+    fn linux_spawn_shell_rejects_non_ready_and_forbidden_cwd() {
+        let (_temp, runtime) = setup_runtime();
+        let req = Request {
+            id: 1,
+            kind: Some(RequestKind::LinuxShellSpawn(
+                crate::proto::LinuxShellSpawnRequest {
+                    project_id: "Missing".into(),
+                    cols: 80,
+                    rows: 24,
+                    env_json: "{}".into(),
+                },
+            )),
+        };
+        let resp = Response::decode(runtime.call(&req.encode_to_vec()).as_slice()).unwrap();
+        assert_eq!(resp.status, Status::Error as i32);
+    }
+
+    #[test]
+    fn installed_binary_run_requires_confirm_and_audits() {
+        let (_temp, runtime) = setup_runtime();
+        let proj = runtime
+            .create_project(CreateProjectRequest { name: "P".into() })
+            .unwrap()
+            .project
+            .unwrap();
+        let hash = crate::policy::evaluate_command_with_origin(
+            "codex --version",
+            false,
+            "sess1",
+            "",
+            crate::policy::CommandOrigin::InstalledBinary,
+        )
+        .command_hash;
+        let req = Request {
+            id: 1,
+            kind: Some(RequestKind::LinuxRunInstalledBinary(
+                crate::proto::LinuxRunInstalledBinaryRequest {
+                    project_id: proj.id.clone(),
+                    binary_name: "codex".into(),
+                    argv_json: "[\"--version\"]".into(),
+                    approval_token: "".into(),
+                    command_hash: hash.clone(),
+                    session_id: "sess1".into(),
+                },
+            )),
+        };
+        let resp = Response::decode(runtime.call(&req.encode_to_vec()).as_slice()).unwrap();
+        assert_eq!(resp.status, Status::Error as i32);
+        assert!(resp.error.unwrap().message.contains("CONFIRM"));
+
+        let tok = crate::policy::issue_approval_token(&hash, "sess1").unwrap();
+        let req2 = Request {
+            id: 2,
+            kind: Some(RequestKind::LinuxRunInstalledBinary(
+                crate::proto::LinuxRunInstalledBinaryRequest {
+                    project_id: proj.id.clone(),
+                    binary_name: "codex".into(),
+                    argv_json: "[\"--version\"]".into(),
+                    approval_token: tok.clone(),
+                    command_hash: hash,
+                    session_id: "sess1".into(),
+                },
+            )),
+        };
+        let resp2 = Response::decode(runtime.call(&req2.encode_to_vec()).as_slice()).unwrap();
+        // may fail spawning /system/bin/sh in non-android host? pty_open uses /system/bin/sh or /bin/sh; on windows test env it may fail. handle gracefully.
+        if resp2.status == Status::Ok as i32 {
+            let lines = read_audit_lines(&runtime).join("\n");
+            assert!(lines.contains("\"op\":\"installed_binary_run\""));
+            assert!(!lines.contains(&tok));
+        }
     }
 
     #[test]

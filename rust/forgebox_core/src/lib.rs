@@ -13,6 +13,7 @@ pub mod vfs;
 mod audit;
 mod db;
 mod git;
+mod linux_env;
 mod policy;
 mod pty;
 mod runtime;

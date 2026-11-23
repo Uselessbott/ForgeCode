@@ -169,6 +169,7 @@ fun EditorScreen(
                     onDismissRestore = TerminalSessionController::dismissRestoreBanner,
                     onApproveApproval = TerminalSessionController::approvePending,
                     onDenyApproval = TerminalSessionController::denyPending,
+                    onShellKindChange = TerminalSessionController::setPreferredShellKind,
                     modifier = Modifier.fillMaxWidth().weight(terminalFraction),
                 )
             }

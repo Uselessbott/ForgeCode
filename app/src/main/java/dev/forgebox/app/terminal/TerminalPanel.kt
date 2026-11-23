@@ -53,6 +53,7 @@ fun TerminalPanel(
     onDismissRestore: () -> Unit,
     onApproveApproval: () -> Unit = {},
     onDenyApproval: () -> Unit = {},
+    onShellKindChange: (TerminalShellKind) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val focusRequester = remember { FocusRequester() }
@@ -70,13 +71,16 @@ fun TerminalPanel(
     Column(modifier.background(Color(0xFF111111))) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             TextButton(onClick = onCreate, enabled = canCreate) { Text("+") }
+            TextButton(onClick = { onShellKindChange(TerminalShellKind.BIONIC) }) { Text(if (state.preferredShellKind==TerminalShellKind.BIONIC) "[Bionic]" else "Bionic", color = Color.White) }
+            TextButton(onClick = { if (state.linuxEnvReady) onShellKindChange(TerminalShellKind.LINUX) }, enabled = state.linuxEnvReady) { Text(if (state.preferredShellKind==TerminalShellKind.LINUX) "[Linux]" else "Linux", color = if (state.linuxEnvReady) Color.White else Color.Gray) }
             if (!canCreate) Text("cap ${state.sessionCap}", color = Color(0xFFCCAA66), style = MaterialTheme.typography.labelSmall)
             Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 state.sessions.forEach { s ->
                     val selected = s.ptyId == state.activePtyId
                     TextButton(onClick = { onSelect(s.ptyId) }) {
+                        val k = if (s.shellKind == TerminalShellKind.LINUX) "L" else "B"
                         Text(
-                            s.name + if (s.lifecycle == TerminalSessionLifecycle.EXITED) " [exit]" else if (s.restorable) " [restore]" else "",
+                            "[$k] ${s.name}" + if (s.lifecycle == TerminalSessionLifecycle.EXITED) " [exit]" else if (s.restorable) " [restore]" else "",
                             color = if (selected) Color.White else Color(0xFFBBBBBB),
                         )
                     }
