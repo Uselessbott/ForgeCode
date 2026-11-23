@@ -12,6 +12,7 @@ pub mod vfs;
 
 mod audit;
 mod db;
+mod git;
 mod policy;
 mod pty;
 mod runtime;

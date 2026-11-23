@@ -1,4 +1,4 @@
-package dev.forgebox.app.ui
+﻿package dev.forgebox.app.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
@@ -46,6 +46,7 @@ fun ProjectExplorerScreen(
     viewModel: ProjectExplorerViewModel,
     onBack: () -> Unit,
     onOpenFile: (String) -> Unit,
+    onOpenGit: () -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
     var showCreateFile by remember { mutableStateOf(false) }
@@ -73,6 +74,7 @@ fun ProjectExplorerScreen(
                     Text(projectId, style = MaterialTheme.typography.titleLarge)
                     Text("Project-relative paths only. Rust VFS validates all operations.", style = MaterialTheme.typography.labelSmall)
                 }
+                TextButton(onClick = onOpenGit) { Text("Git") }
                 TextButton(onClick = { viewModel.refresh() }) { Text("Refresh") }
             }
 
@@ -185,3 +187,4 @@ fun ProjectExplorerScreen(
         )
     }
 }
+

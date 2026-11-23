@@ -1,4 +1,4 @@
-package dev.forgebox.data
+﻿package dev.forgebox.data
 
 import dev.forgebox.core.ForgeBoxCore
 import dev.forgebox.proto.ForgeProto
@@ -151,6 +151,86 @@ class WorkspaceRepository(
         )
     }
 
+    fun gitInit(projectId: String): Result<Unit> = runCatching {
+        call(ForgeProto.Request.newBuilder().setGitInit(ForgeProto.GitInitRequest.newBuilder().setProjectId(projectId)))
+        Unit
+    }
+
+    fun gitStatus(projectId: String): Result<GitStatusModel> = runCatching {
+        val r = call(ForgeProto.Request.newBuilder().setGitStatus(ForgeProto.GitStatusRequest.newBuilder().setProjectId(projectId))).gitStatus
+        GitStatusModel(
+            staged = r.stagedList.map { GitFileStatusModel(it.path, it.status, it.isBinary) },
+            unstaged = r.unstagedList.map { GitFileStatusModel(it.path, it.status, it.isBinary) },
+            untracked = r.untrackedList.map { GitFileStatusModel(it.path, it.status, it.isBinary) },
+            branch = r.branch,
+        )
+    }
+
+    fun gitDiff(projectId: String, scope: String, path: String = ""): Result<String> = runCatching {
+        call(ForgeProto.Request.newBuilder().setGitDiff(ForgeProto.GitDiffRequest.newBuilder().setProjectId(projectId).setScope(scope).setPath(path))).gitDiff.unifiedDiff
+    }
+
+    fun gitStage(projectId: String, files: List<String>): Result<Unit> = runCatching {
+        call(ForgeProto.Request.newBuilder().setGitStage(ForgeProto.GitStageRequest.newBuilder().setProjectId(projectId).addAllFiles(files)))
+        Unit
+    }
+
+    fun gitUnstage(projectId: String, files: List<String>): Result<Unit> = runCatching {
+        call(ForgeProto.Request.newBuilder().setGitUnstage(ForgeProto.GitUnstageRequest.newBuilder().setProjectId(projectId).addAllFiles(files)))
+        Unit
+    }
+
+    fun gitCommit(projectId: String, message: String, authorName: String, authorEmail: String): Result<String> = runCatching {
+        call(ForgeProto.Request.newBuilder().setGitCommit(ForgeProto.GitCommitRequest.newBuilder().setProjectId(projectId).setMessage(message).setAuthorName(authorName).setAuthorEmail(authorEmail))).gitCommit.commitId
+    }
+
+    fun gitBranchList(projectId: String): Result<List<GitBranchModel>> = runCatching {
+        call(ForgeProto.Request.newBuilder().setGitBranchList(ForgeProto.GitBranchListRequest.newBuilder().setProjectId(projectId))).gitBranchList.branchesList.map { GitBranchModel(it.name, it.isCurrent) }
+    }
+
+    fun gitBranchCreate(projectId: String, name: String): Result<Unit> = runCatching {
+        call(ForgeProto.Request.newBuilder().setGitBranchCreate(ForgeProto.GitBranchCreateRequest.newBuilder().setProjectId(projectId).setName(name)))
+        Unit
+    }
+
+    fun gitBranchSwitch(projectId: String, name: String): Result<Unit> = runCatching {
+        call(ForgeProto.Request.newBuilder().setGitBranchSwitch(ForgeProto.GitBranchSwitchRequest.newBuilder().setProjectId(projectId).setName(name)))
+        Unit
+    }
+
+    fun gitLog(projectId: String, limit: Int = 50): Result<List<GitCommitModel>> = runCatching {
+        call(ForgeProto.Request.newBuilder().setGitLog(ForgeProto.GitLogRequest.newBuilder().setProjectId(projectId).setLimit(limit))).gitLog.commitsList.map { GitCommitModel(it.commitId, it.author, it.email, it.message, it.timestamp) }
+    }
+
+    fun gitShow(projectId: String, commitId: String): Result<String> = runCatching {
+        call(ForgeProto.Request.newBuilder().setGitShow(ForgeProto.GitShowRequest.newBuilder().setProjectId(projectId).setCommitId(commitId))).gitShow.unifiedDiff
+    }
+
+    fun gitCloneLocal(sourceProjectId: String, targetProjectName: String): Result<String> = runCatching {
+        call(ForgeProto.Request.newBuilder().setGitCloneLocal(ForgeProto.GitCloneLocalRequest.newBuilder().setSourceProjectId(sourceProjectId).setTargetProjectName(targetProjectName))).gitCloneLocal.projectId
+    }
+
+    fun gitRemoteFetch(projectId: String, remote: String, credentialHandle: String): Result<String> = runCatching {
+        call(ForgeProto.Request.newBuilder().setGitRemoteFetch(ForgeProto.GitRemoteFetchRequest.newBuilder().setProjectId(projectId).setRemote(remote).setCredentialHandle(credentialHandle))).gitRemoteFetch.message
+    }
+
+    fun gitRemotePush(projectId: String, remote: String, branch: String, force: Boolean, credentialHandle: String, approvalToken: String): Result<String> = runCatching {
+        call(ForgeProto.Request.newBuilder().setGitRemotePush(ForgeProto.GitRemotePushRequest.newBuilder().setProjectId(projectId).setRemote(remote).setBranch(branch).setForce(force).setCredentialHandle(credentialHandle).setApprovalToken(approvalToken))).gitRemotePush.message
+    }
+
+    fun evaluateCommand(command: String, actorIsAgent: Boolean, sessionId: String, cwd: String): Result<ForgeProto.EvaluateCommandResponse> = runCatching {
+        call(ForgeProto.Request.newBuilder().setEvaluateCommand(ForgeProto.EvaluateCommandRequest.newBuilder().setCommand(command).setActorIsAgent(actorIsAgent).setSessionId(sessionId).setCwd(cwd))).evaluateCommand
+    }
+
+    fun issueApprovalToken(commandHash: String, sessionId: String): Result<String> = runCatching {
+        call(ForgeProto.Request.newBuilder().setIssueApprovalToken(ForgeProto.IssueApprovalTokenRequest.newBuilder().setCommandHash(commandHash).setSessionId(sessionId))).issueApprovalToken.token
+    }
+
+    fun consumeApprovalToken(token: String, commandHash: String, sessionId: String): Result<Unit> = runCatching {
+        call(ForgeProto.Request.newBuilder().setConsumeApprovalToken(ForgeProto.ConsumeApprovalTokenRequest.newBuilder().setToken(token).setCommandHash(commandHash).setSessionId(sessionId)))
+        Unit
+    }
+
     private fun call(builder: ForgeProto.Request.Builder): ForgeProto.Response {
         val request = builder.setId(ids.getAndIncrement()).build()
         val response = core.call(request)
@@ -170,3 +250,5 @@ class WorkspaceRepository(
         storageBytes = storageBytes,
     )
 }
+
+

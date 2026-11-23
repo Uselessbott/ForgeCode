@@ -1,0 +1,4 @@
+﻿# M9 pre-step: M8 unix supervisor tests execution
+- WSL: not installed (`wsl --status` reports not installed).
+- Docker: not available on PATH.
+- Result: M8 `#[cfg(unix)]` supervisor tests (`supervisor_close_kills_forked_child_process_group`, `supervisor_stop_all_kills_all_sessions_no_zombies`, `runtime_drop_kills_sessions`) remain execution-unverified on this Windows host. They are compiled in Unix target builds only; no Unix runtime was available.

@@ -165,10 +165,18 @@ pub fn evaluate_command(
         creates_checkpoint = true;
         file_count_estimate = BULK_OVERWRITE_FILE_COUNT_THRESHOLD + 1;
         affects_outside_project = false;
-    } else if is_force_push(&tokens, &lower) {
+    } else if is_git_push(&tokens, &lower) {
         decision = PolicyDecision::Confirm;
-        classification = "git_force_push".into();
-        reason = "Force push requires confirmation".into();
+        classification = if lower.contains("--force")
+            || lower.contains("--force-with-lease")
+            || lower.contains(" -f")
+            || lower.contains("--mirror")
+        {
+            "git_force_push".into()
+        } else {
+            "git_push".into()
+        };
+        reason = "Git push requires confirmation".into();
         creates_checkpoint = true;
         file_count_estimate = 1;
         affects_outside_project = false;
@@ -374,14 +382,10 @@ fn is_bulk_overwrite(_tokens: &[String], lower: &str) -> bool {
         || (lower.contains("tee ") && lower.contains('*'))
         || lower.contains("rsync -a --delete")
 }
-fn is_force_push(tokens: &[String], lower: &str) -> bool {
-    tokens.first().map(|s| s.as_str()) == Some("git")
-        && tokens.iter().any(|t| t == "push")
-        && (lower.contains("--force")
-            || lower.contains("--force-with-lease")
-            || tokens.iter().any(|t| t == "-f")
-            || lower.contains("--mirror"))
+fn is_git_push(tokens: &[String], _lower: &str) -> bool {
+    tokens.first().map(|s| s == "git").unwrap_or(false) && tokens.iter().any(|t| t == "push")
 }
+
 fn is_git_reset_hard(tokens: &[String], _lower: &str) -> bool {
     tokens.len() >= 3
         && tokens[0] == "git"
@@ -535,6 +539,7 @@ mod tests {
             "git push --force-with-lease",
             "git push -f origin main",
             "git push --mirror origin",
+            "git push origin main",
         ] {
             let a = evaluate_command(cmd, false, "s1", "/p");
             assert_eq!(a.decision, PolicyDecision::Confirm, "{cmd}");

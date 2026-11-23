@@ -982,6 +982,296 @@ impl Runtime {
                     }
                 }
             }
+            Some(RequestKind::GitInit(request)) => {
+                let root = self.project_root_by_id(&request.project_id)?;
+                crate::git::init_repo(&root)?;
+                let _ = self.audit.append(&AuditRecord {
+                    ts: audit::now_iso8601(),
+                    actor: "user".into(),
+                    op: "git_init".into(),
+                    resolved_paths: vec![root.to_string_lossy().into_owned()],
+                    before_hash: None,
+                    after_hash: None,
+                    policy_result: "ALLOW".into(),
+                    approval_id: None,
+                    session_id: Some(request.project_id.clone()),
+                });
+                Ok(ResponseKind::GitInit(crate::proto::GitInitResponse {
+                    ok: true,
+                }))
+            }
+            Some(RequestKind::GitStatus(request)) => {
+                let root = self.project_root_by_id(&request.project_id)?;
+                let s = crate::git::status(&root)?;
+                Ok(ResponseKind::GitStatus(crate::proto::GitStatusResponse {
+                    staged: s
+                        .staged
+                        .into_iter()
+                        .map(|e| crate::proto::GitFileStatus {
+                            path: e.path,
+                            status: e.status,
+                            is_binary: e.is_binary,
+                        })
+                        .collect(),
+                    unstaged: s
+                        .unstaged
+                        .into_iter()
+                        .map(|e| crate::proto::GitFileStatus {
+                            path: e.path,
+                            status: e.status,
+                            is_binary: e.is_binary,
+                        })
+                        .collect(),
+                    untracked: s
+                        .untracked
+                        .into_iter()
+                        .map(|e| crate::proto::GitFileStatus {
+                            path: e.path,
+                            status: e.status,
+                            is_binary: e.is_binary,
+                        })
+                        .collect(),
+                    branch: s.branch,
+                }))
+            }
+            Some(RequestKind::GitDiff(request)) => {
+                let root = self.project_root_by_id(&request.project_id)?;
+                let diff = crate::git::diff(
+                    &root,
+                    &request.scope,
+                    if request.path.is_empty() {
+                        None
+                    } else {
+                        Some(&request.path)
+                    },
+                )?;
+                Ok(ResponseKind::GitDiff(crate::proto::GitDiffResponse {
+                    unified_diff: diff,
+                }))
+            }
+            Some(RequestKind::GitStage(request)) => {
+                let root = self.project_root_by_id(&request.project_id)?;
+                crate::git::stage(&root, &request.files)?;
+                let _ = self.audit.append(&AuditRecord {
+                    ts: audit::now_iso8601(),
+                    actor: "user".into(),
+                    op: "git_stage".into(),
+                    resolved_paths: request.files.clone(),
+                    before_hash: None,
+                    after_hash: None,
+                    policy_result: "ALLOW".into(),
+                    approval_id: None,
+                    session_id: Some(request.project_id.clone()),
+                });
+                Ok(ResponseKind::GitStage(crate::proto::GitStageResponse {
+                    ok: true,
+                }))
+            }
+            Some(RequestKind::GitUnstage(request)) => {
+                let root = self.project_root_by_id(&request.project_id)?;
+                crate::git::unstage(&root, &request.files)?;
+                let _ = self.audit.append(&AuditRecord {
+                    ts: audit::now_iso8601(),
+                    actor: "user".into(),
+                    op: "git_unstage".into(),
+                    resolved_paths: request.files.clone(),
+                    before_hash: None,
+                    after_hash: None,
+                    policy_result: "ALLOW".into(),
+                    approval_id: None,
+                    session_id: Some(request.project_id.clone()),
+                });
+                Ok(ResponseKind::GitUnstage(crate::proto::GitUnstageResponse {
+                    ok: true,
+                }))
+            }
+            Some(RequestKind::GitCommit(request)) => {
+                let root = self.project_root_by_id(&request.project_id)?;
+                let commit_id = crate::git::commit(
+                    &root,
+                    &request.message,
+                    &request.author_name,
+                    &request.author_email,
+                )?;
+                let _ = self.audit.append(&AuditRecord {
+                    ts: audit::now_iso8601(),
+                    actor: "user".into(),
+                    op: "git_commit".into(),
+                    resolved_paths: vec![root.to_string_lossy().into_owned()],
+                    before_hash: None,
+                    after_hash: Some(commit_id.clone()),
+                    policy_result: "ALLOW".into(),
+                    approval_id: None,
+                    session_id: Some(request.project_id.clone()),
+                });
+                Ok(ResponseKind::GitCommit(crate::proto::GitCommitResponse {
+                    commit_id,
+                }))
+            }
+            Some(RequestKind::GitBranchList(request)) => {
+                let root = self.project_root_by_id(&request.project_id)?;
+                let branches = crate::git::branch_list(&root)?;
+                Ok(ResponseKind::GitBranchList(
+                    crate::proto::GitBranchListResponse {
+                        branches: branches
+                            .into_iter()
+                            .map(|(name, is_current)| crate::proto::GitBranchInfo {
+                                name,
+                                is_current,
+                            })
+                            .collect(),
+                    },
+                ))
+            }
+            Some(RequestKind::GitBranchCreate(request)) => {
+                let root = self.project_root_by_id(&request.project_id)?;
+                crate::git::branch_create(&root, &request.name)?;
+                let _ = self.audit.append(&AuditRecord {
+                    ts: audit::now_iso8601(),
+                    actor: "user".into(),
+                    op: "git_branch_create".into(),
+                    resolved_paths: vec![request.name.clone()],
+                    before_hash: None,
+                    after_hash: None,
+                    policy_result: "ALLOW".into(),
+                    approval_id: None,
+                    session_id: Some(request.project_id.clone()),
+                });
+                Ok(ResponseKind::GitBranchCreate(
+                    crate::proto::GitBranchCreateResponse { ok: true },
+                ))
+            }
+            Some(RequestKind::GitBranchSwitch(request)) => {
+                let root = self.project_root_by_id(&request.project_id)?;
+                crate::git::branch_switch(&root, &request.name)?;
+                let _ = self.audit.append(&AuditRecord {
+                    ts: audit::now_iso8601(),
+                    actor: "user".into(),
+                    op: "git_branch_switch".into(),
+                    resolved_paths: vec![request.name.clone()],
+                    before_hash: None,
+                    after_hash: None,
+                    policy_result: "ALLOW".into(),
+                    approval_id: None,
+                    session_id: Some(request.project_id.clone()),
+                });
+                Ok(ResponseKind::GitBranchSwitch(
+                    crate::proto::GitBranchSwitchResponse { ok: true },
+                ))
+            }
+            Some(RequestKind::GitLog(request)) => {
+                let root = self.project_root_by_id(&request.project_id)?;
+                let commits = crate::git::log(&root, request.limit)?;
+                Ok(ResponseKind::GitLog(crate::proto::GitLogResponse {
+                    commits: commits
+                        .into_iter()
+                        .map(|c| crate::proto::GitCommitInfo {
+                            commit_id: c.commit_id,
+                            author: c.author,
+                            email: c.email,
+                            message: c.message,
+                            timestamp: c.timestamp,
+                        })
+                        .collect(),
+                }))
+            }
+            Some(RequestKind::GitShow(request)) => {
+                let root = self.project_root_by_id(&request.project_id)?;
+                let diff = crate::git::show(&root, &request.commit_id)?;
+                Ok(ResponseKind::GitShow(crate::proto::GitShowResponse {
+                    unified_diff: diff,
+                }))
+            }
+            Some(RequestKind::GitCloneLocal(request)) => {
+                let source_root = self.project_root_by_id(&request.source_project_id)?;
+                let target_name = request.target_project_name.clone();
+                let created = self
+                    .create_project(CreateProjectRequest {
+                        name: target_name.clone(),
+                    })?
+                    .project
+                    .ok_or_else(|| CoreError::Internal("missing project".into()))?;
+                let target_id = created.id;
+                let target_root = self.project_root_by_id(&target_id)?;
+                if target_root.exists() {
+                    std::fs::remove_dir_all(&target_root)?;
+                }
+                crate::git::clone_local(&source_root, &target_root)?;
+                let _ = self.audit.append(&AuditRecord {
+                    ts: audit::now_iso8601(),
+                    actor: "user".into(),
+                    op: "git_clone_local".into(),
+                    resolved_paths: vec![
+                        source_root.to_string_lossy().into_owned(),
+                        target_root.to_string_lossy().into_owned(),
+                    ],
+                    before_hash: None,
+                    after_hash: Some(target_id.clone()),
+                    policy_result: "ALLOW".into(),
+                    approval_id: None,
+                    session_id: Some(request.source_project_id.clone()),
+                });
+                Ok(ResponseKind::GitCloneLocal(
+                    crate::proto::GitCloneLocalResponse {
+                        project_id: target_id,
+                    },
+                ))
+            }
+            Some(RequestKind::GitRemoteFetch(request)) => {
+                if request.credential_handle.trim().is_empty() {
+                    return Err(CoreError::InvalidArgument(
+                        "remote fetch requires credential broker handle".into(),
+                    ));
+                }
+                let _ = self.project_root_by_id(&request.project_id)?;
+                Ok(ResponseKind::GitRemoteFetch(crate::proto::GitRemoteFetchResponse { ok: false, message: "Remote fetch not runtime-verified in M9; credential handle accepted but network operation not executed in this build.".into() }))
+            }
+            Some(RequestKind::GitRemotePush(request)) => {
+                let cmd = if request.force {
+                    "git push --force".to_string()
+                } else {
+                    "git push".to_string()
+                };
+                let assessment =
+                    crate::policy::evaluate_command(&cmd, false, &request.project_id, "");
+                if assessment.decision == crate::policy::PolicyDecision::Confirm {
+                    crate::policy::consume_approval_token(
+                        &request.approval_token,
+                        &assessment.command_hash,
+                        &request.project_id,
+                    )?;
+                } else if assessment.decision == crate::policy::PolicyDecision::Deny {
+                    return Err(CoreError::InvalidArgument(format!(
+                        "push denied: {}",
+                        assessment.reason
+                    )));
+                }
+                if request.credential_handle.trim().is_empty() {
+                    return Err(CoreError::InvalidArgument(
+                        "remote push requires credential broker handle".into(),
+                    ));
+                }
+                let _ = self.project_root_by_id(&request.project_id)?;
+                let _ = self.audit.append(&AuditRecord {
+                    ts: audit::now_iso8601(),
+                    actor: "user".into(),
+                    op: "git_push".into(),
+                    resolved_paths: vec![request.remote.clone(), request.branch.clone()],
+                    before_hash: None,
+                    after_hash: None,
+                    policy_result: "CONFIRM".into(),
+                    approval_id: Some(audit::redact(&request.approval_token)),
+                    session_id: Some(request.project_id.clone()),
+                });
+                Ok(ResponseKind::GitRemotePush(crate::proto::GitRemotePushResponse { ok: false, message: "Remote push not runtime-verified in M9; approval/credential checks enforced, network operation not executed in this build.".into() }))
+            }
+            Some(RequestKind::GitAuthStartDeviceFlow(_))
+            | Some(RequestKind::GitAuthPoll(_))
+            | Some(RequestKind::GitAuthStorePat(_))
+            | Some(RequestKind::GitAuthRevoke(_))
+            | Some(RequestKind::GitCredentialForRemote(_)) => Err(CoreError::InvalidArgument(
+                "git auth/credential broker operations are handled by Kotlin broker layer".into(),
+            )),
             None => Err(CoreError::InvalidArgument("missing request kind".into())),
         }
     }
@@ -1450,6 +1740,22 @@ impl Runtime {
     fn project_dir(&self, project_id: &str) -> Result<PathBuf> {
         vfs::validate_project_name(project_id)?;
         Ok(self.workspace_root.join("Projects").join(project_id))
+    }
+
+    fn project_root_by_id(&self, project_id: &str) -> Result<PathBuf> {
+        self.assert_project_exists(project_id)?;
+        let dir = self.project_dir(project_id)?;
+        vfs::canonical_root(&dir)
+    }
+
+    fn find_project_id_by_name(&self, name: &str) -> Result<String> {
+        let db = self.db.lock().map_err(lock_error)?;
+        let projects = db::list_projects(&db)?;
+        projects
+            .into_iter()
+            .find(|p| p.name == name)
+            .map(|p| p.id)
+            .ok_or_else(|| CoreError::NotFound(format!("project not found: {name}")))
     }
 
     fn assert_project_exists(&self, project_id: &str) -> Result<()> {

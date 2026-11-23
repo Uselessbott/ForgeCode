@@ -1,4 +1,4 @@
-package dev.forgebox.app.ui
+﻿package dev.forgebox.app.ui
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -40,7 +40,7 @@ fun ForgeBoxApp() {
                 )
                 if (response.status == ForgeProto.Status.OK && response.hasGetInfo()) {
                     val info = response.getInfo
-                    "Core ${info.version} · ${info.projectCount} projects"
+                    "Core ${info.version} Â· ${info.projectCount} projects"
                 } else {
                     "Core error: ${response.error.code} ${response.error.message}"
                 }
@@ -58,7 +58,14 @@ fun ForgeBoxApp() {
         }
 
         val repository = remember { WorkspaceRepository(ForgeBoxRuntime) }
+        val credentialBroker = remember {
+            runCatching {
+                val store = dev.forgebox.auth.SecureTokenStore(context.applicationContext)
+                dev.forgebox.auth.DefaultCredentialBroker(store, dev.forgebox.auth.DeviceFlowHttpApi())
+            }.getOrNull()
+        }
         var openFilePath by rememberSaveable { mutableStateOf<String?>(null) }
+        var openGit by rememberSaveable { mutableStateOf(false) }
         val projectId = selectedProjectId
         if (projectId == null) {
             val vm: ProjectListViewModel = viewModel(factory = ProjectListViewModel.factory(repository))
@@ -67,6 +74,9 @@ fun ForgeBoxApp() {
                 coreStatus = coreStatus,
                 onOpenProject = { selectedProjectId = it },
             )
+        } else if (openGit) {
+            val vm: GitViewModel = viewModel(factory = GitViewModel.factory(repository, credentialBroker))
+            GitScreen(projectId = projectId, viewModel = vm, onBack = { openGit = false })
         } else if (openFilePath != null) {
             val vm: EditorViewModel = viewModel(factory = EditorViewModel.factory(repository))
             EditorScreen(
@@ -82,7 +92,10 @@ fun ForgeBoxApp() {
                 viewModel = vm,
                 onBack = { selectedProjectId = null },
                 onOpenFile = { openFilePath = it },
+                onOpenGit = { openGit = true },
             )
         }
     }
 }
+
+

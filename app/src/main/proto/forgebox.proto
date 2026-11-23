@@ -31,6 +31,25 @@ message Request {
     EvaluateCommandRequest evaluate_command = 18;
     IssueApprovalTokenRequest issue_approval_token = 19;
     ConsumeApprovalTokenRequest consume_approval_token = 20;
+    GitInitRequest git_init = 21;
+    GitStatusRequest git_status = 22;
+    GitDiffRequest git_diff = 23;
+    GitStageRequest git_stage = 24;
+    GitUnstageRequest git_unstage = 25;
+    GitCommitRequest git_commit = 26;
+    GitBranchListRequest git_branch_list = 27;
+    GitBranchCreateRequest git_branch_create = 28;
+    GitBranchSwitchRequest git_branch_switch = 29;
+    GitLogRequest git_log = 30;
+    GitShowRequest git_show = 31;
+    GitCloneLocalRequest git_clone_local = 32;
+    GitRemoteFetchRequest git_remote_fetch = 33;
+    GitRemotePushRequest git_remote_push = 34;
+    GitAuthStartDeviceFlowRequest git_auth_start_device_flow = 35;
+    GitAuthPollRequest git_auth_poll = 36;
+    GitAuthStorePatRequest git_auth_store_pat = 37;
+    GitAuthRevokeRequest git_auth_revoke = 38;
+    GitCredentialForRemoteRequest git_credential_for_remote = 39;
   }
 }
 
@@ -58,6 +77,25 @@ message Response {
     EvaluateCommandResponse evaluate_command = 20;
     IssueApprovalTokenResponse issue_approval_token = 21;
     ConsumeApprovalTokenResponse consume_approval_token = 22;
+    GitInitResponse git_init = 23;
+    GitStatusResponse git_status = 24;
+    GitDiffResponse git_diff = 25;
+    GitStageResponse git_stage = 26;
+    GitUnstageResponse git_unstage = 27;
+    GitCommitResponse git_commit = 28;
+    GitBranchListResponse git_branch_list = 29;
+    GitBranchCreateResponse git_branch_create = 30;
+    GitBranchSwitchResponse git_branch_switch = 31;
+    GitLogResponse git_log = 32;
+    GitShowResponse git_show = 33;
+    GitCloneLocalResponse git_clone_local = 34;
+    GitRemoteFetchResponse git_remote_fetch = 35;
+    GitRemotePushResponse git_remote_push = 36;
+    GitAuthStartDeviceFlowResponse git_auth_start_device_flow = 37;
+    GitAuthPollResponse git_auth_poll = 38;
+    GitAuthStorePatResponse git_auth_store_pat = 39;
+    GitAuthRevokeResponse git_auth_revoke = 40;
+    GitCredentialForRemoteResponse git_credential_for_remote = 41;
   }
 }
 
@@ -315,3 +353,54 @@ message IssueApprovalTokenRequest { string command_hash = 1; string session_id =
 message IssueApprovalTokenResponse { string token = 1; int64 expires_in_seconds = 2; }
 message ConsumeApprovalTokenRequest { string token = 1; string command_hash = 2; string session_id = 3; }
 message ConsumeApprovalTokenResponse { bool ok = 1; }
+
+message GitInitRequest { string project_id = 1; }
+message GitInitResponse { bool ok = 1; }
+
+message GitFileStatus { string path = 1; string status = 2; bool is_binary = 3; }
+message GitStatusRequest { string project_id = 1; }
+message GitStatusResponse { repeated GitFileStatus staged = 1; repeated GitFileStatus unstaged = 2; repeated GitFileStatus untracked = 3; string branch = 4; }
+
+message GitDiffRequest { string project_id = 1; string scope = 2; string path = 3; }
+message GitDiffResponse { string unified_diff = 1; }
+
+message GitStageRequest { string project_id = 1; repeated string files = 2; }
+message GitStageResponse { bool ok = 1; }
+message GitUnstageRequest { string project_id = 1; repeated string files = 2; }
+message GitUnstageResponse { bool ok = 1; }
+
+message GitCommitRequest { string project_id = 1; string message = 2; string author_name = 3; string author_email = 4; }
+message GitCommitResponse { string commit_id = 1; }
+
+message GitBranchListRequest { string project_id = 1; }
+message GitBranchInfo { string name = 1; bool is_current = 2; }
+message GitBranchListResponse { repeated GitBranchInfo branches = 1; }
+message GitBranchCreateRequest { string project_id = 1; string name = 2; }
+message GitBranchCreateResponse { bool ok = 1; }
+message GitBranchSwitchRequest { string project_id = 1; string name = 2; }
+message GitBranchSwitchResponse { bool ok = 1; }
+
+message GitLogRequest { string project_id = 1; uint32 limit = 2; }
+message GitCommitInfo { string commit_id = 1; string author = 2; string email = 3; string message = 4; int64 timestamp = 5; }
+message GitLogResponse { repeated GitCommitInfo commits = 1; }
+message GitShowRequest { string project_id = 1; string commit_id = 2; }
+message GitShowResponse { string unified_diff = 1; }
+
+message GitCloneLocalRequest { string source_project_id = 1; string target_project_name = 2; }
+message GitCloneLocalResponse { string project_id = 1; }
+
+message GitRemoteFetchRequest { string project_id = 1; string remote = 2; string credential_handle = 3; }
+message GitRemoteFetchResponse { bool ok = 1; string message = 2; }
+message GitRemotePushRequest { string project_id = 1; string remote = 2; string branch = 3; bool force = 4; string credential_handle = 5; string approval_token = 6; }
+message GitRemotePushResponse { bool ok = 1; string message = 2; }
+
+message GitAuthStartDeviceFlowRequest { string provider = 1; }
+message GitAuthStartDeviceFlowResponse { string device_code = 1; string user_code = 2; string verification_uri = 3; int32 expires_in = 4; int32 interval = 5; }
+message GitAuthPollRequest { string provider = 1; string device_code = 2; }
+message GitAuthPollResponse { string status = 1; string token_handle = 2; string message = 3; }
+message GitAuthStorePatRequest { string provider = 1; string pat = 2; }
+message GitAuthStorePatResponse { string token_handle = 1; }
+message GitAuthRevokeRequest { string provider = 1; }
+message GitAuthRevokeResponse { bool ok = 1; }
+message GitCredentialForRemoteRequest { string project_id = 1; string remote_url = 2; string operation = 3; string provider = 4; }
+message GitCredentialForRemoteResponse { string credential_handle = 1; int64 expires_at = 2; }
