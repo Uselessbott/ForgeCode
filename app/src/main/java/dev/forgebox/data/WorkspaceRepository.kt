@@ -310,6 +310,19 @@ class WorkspaceRepository(
         NetworkDecisionModel(allow = r.allow, ask = r.ask, reason = r.reason, effectiveMode = r.effectiveMode.name)
     }
 
+    fun buildRun(projectId: String, kind: ForgeProto.BuildKind, filePath: String = "", command: String = "", cols: Int = 80, rows: Int = 24): Result<BuildRunResultModel> = runCatching {
+        val r = call(ForgeProto.Request.newBuilder().setBuildRun(
+            ForgeProto.BuildRunRequest.newBuilder()
+                .setProjectId(projectId)
+                .setKind(kind)
+                .setFilePath(filePath)
+                .setCommand(command)
+                .setCols(cols)
+                .setRows(rows)
+        )).buildRun
+        BuildRunResultModel(r.ptyId, r.command, r.message, r.pythonMissing)
+    }
+
     private fun call(builder: ForgeProto.Request.Builder): ForgeProto.Response {
         val request = builder.setId(ids.getAndIncrement()).build()
         val response = core.call(request)

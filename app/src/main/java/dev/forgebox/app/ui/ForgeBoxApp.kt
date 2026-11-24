@@ -79,9 +79,15 @@ fun ForgeBoxApp() {
             GitScreen(projectId = projectId, viewModel = vm, onBack = { openGit = false })
         } else if (openFilePath != null) {
             val vm: EditorViewModel = viewModel(factory = EditorViewModel.factory(repository))
+            val parts = openFilePath!!.split("|", limit = 3)
+            val path = parts[0]
+            val line = parts.getOrNull(1)?.toIntOrNull() ?: 1
+            val col = parts.getOrNull(2)?.toIntOrNull() ?: 1
             EditorScreen(
                 projectId = projectId,
-                initialPath = openFilePath!!,
+                initialPath = path,
+                initialLine = line,
+                initialColumn = col,
                 viewModel = vm,
                 onBack = { openFilePath = null },
             )
@@ -92,6 +98,7 @@ fun ForgeBoxApp() {
                 viewModel = vm,
                 onBack = { selectedProjectId = null },
                 onOpenFile = { openFilePath = it },
+                onOpenFileAt = { pth, l, c -> openFilePath = "$pth|$l|$c" },
                 onOpenGit = { openGit = true },
             )
         }

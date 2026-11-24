@@ -66,6 +66,8 @@ message Request {
     NetworkCancelRequest network_cancel = 53;
     NetworkSessionPolicyRequest network_session_policy = 54;
     NetworkDecisionRequest network_decision = 55;
+    BuildRunRequest build_run = 56;
+    SshRunRequest ssh_run = 57;
   }
 }
 
@@ -128,6 +130,8 @@ message Response {
     NetworkCancelResponse network_cancel = 55;
     NetworkSessionPolicyResponse network_session_policy = 56;
     NetworkDecisionResponse network_decision = 57;
+    BuildRunResponse build_run = 58;
+    SshRunResponse ssh_run = 59;
   }
 }
 
@@ -720,4 +724,54 @@ message NetworkDecisionResponse {
   bool ask = 2;
   string reason = 3;
   NetworkMode effective_mode = 4;
+}
+
+
+// M12 build/SSH
+enum BuildKind {
+  BUILD_KIND_UNSPECIFIED = 0;
+  BUILD_KIND_PYTHON = 1;
+  BUILD_KIND_GENERIC_COMMAND = 2;
+  BUILD_KIND_SSH_COMMAND = 3;
+}
+
+message BuildRunRequest {
+  string project_id = 1;
+  BuildKind kind = 2;
+  string file_path = 3; // project-relative for Python
+  string command = 4;   // for generic/SSH
+  string ssh_host_id = 5;
+  uint32 cols = 6;
+  uint32 rows = 7;
+  bool auto_install_python = 8;
+}
+
+message BuildRunResponse {
+  uint64 pty_id = 1;
+  string command = 2;
+  string message = 3;
+  bool python_missing = 4;
+}
+
+message SshHostConfig {
+  string id = 1;
+  string host = 2;
+  uint32 port = 3;
+  string username = 4;
+  string auth_mode = 5; // password|key - scaffold only
+  string credential_handle = 6; // opaque handle from M9 broker
+}
+
+message SshRunRequest {
+  SshHostConfig host = 1;
+  string command = 2;
+  string project_id = 3;
+}
+
+message SshRunResponse {
+  bool ok = 1;
+  string message = 2;
+  string stdout = 3;
+  string stderr = 4;
+  int32 exit_code = 5;
 }

@@ -24,6 +24,8 @@ data class EditorTabState(
     val conflict: String? = null,
     val tooLarge: Boolean = false,
     val readOnly: Boolean = false,
+    val cursorLine: Int = 1,
+    val cursorColumn: Int = 1,
 )
 
 data class EditorUiState(
@@ -40,13 +42,17 @@ class EditorViewModel(
     private val _state = MutableStateFlow(EditorUiState())
     val state: StateFlow<EditorUiState> = _state.asStateFlow()
 
-    fun openFile(projectId: String, path: String) {
+    fun openFile(projectId: String, path: String) { openFileAt(projectId, path, 1, 1) }
+
+    fun openFileAt(projectId: String, path: String, line: Int, column: Int = 1) {
         val existing = _state.value.tabs.indexOfFirst { it.projectId == projectId && it.path == path }
         if (existing >= 0) {
-            _state.value = _state.value.copy(activeIndex = existing)
+            val tabs = _state.value.tabs.toMutableList()
+            tabs[existing] = tabs[existing].copy(cursorLine = line.coerceAtLeast(1), cursorColumn = column.coerceAtLeast(1))
+            _state.value = _state.value.copy(activeIndex = existing, tabs = tabs)
             return
         }
-        val tab = EditorTabState(projectId = projectId, path = path)
+        val tab = EditorTabState(projectId = projectId, path = path, cursorLine = line.coerceAtLeast(1), cursorColumn = column.coerceAtLeast(1))
         _state.value = _state.value.copy(tabs = _state.value.tabs + tab, activeIndex = _state.value.tabs.size)
         loadTab(_state.value.activeIndex)
     }

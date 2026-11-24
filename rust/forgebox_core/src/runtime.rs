@@ -1383,6 +1383,10 @@ impl Runtime {
             Some(RequestKind::NetworkDecision(request)) => Ok(ResponseKind::NetworkDecision(
                 self.network_decision(request)?,
             )),
+            Some(RequestKind::BuildRun(request)) => {
+                Ok(ResponseKind::BuildRun(self.build_run(request)?))
+            }
+            Some(RequestKind::SshRun(request)) => Ok(ResponseKind::SshRun(self.ssh_run(request)?)),
             None => Err(CoreError::InvalidArgument("missing request kind".into())),
         }
     }
@@ -1633,6 +1637,150 @@ impl Runtime {
         Ok(crate::proto::LinuxShellSpawnResponse {
             pty_id,
             env_state: st.state as i32,
+        })
+    }
+
+    fn build_run(
+        &self,
+        request: crate::proto::BuildRunRequest,
+    ) -> Result<crate::proto::BuildRunResponse> {
+        let project_dir = self.project_root_by_id(&request.project_id)?;
+        let mgr = crate::linux_env::LinuxEnvManager::new_with_native_lib_dir(
+            &self.app_data_dir,
+            &self.native_lib_dir,
+        )?;
+        let st = mgr.status();
+        if !matches!(st.state, crate::proto::LinuxEnvState::LinuxEnvReady) {
+            return Err(CoreError::InvalidArgument(format!(
+                "Linux env not ready: {}",
+                st.message
+            )));
+        }
+        let guest_cwd = mgr.ensure_guest_path_mapping(&project_dir)?;
+        let kind = request.kind();
+        let (command, python_missing) = match kind {
+            crate::proto::BuildKind::Python => {
+                let rel = request.file_path.trim().trim_start_matches('/');
+                if rel.is_empty() || rel.contains("..") {
+                    return Err(CoreError::InvalidArgument(
+                        "python file_path must be a project-relative path".into(),
+                    ));
+                }
+                let abs = project_dir.join(rel);
+                if !abs.exists() {
+                    return Err(CoreError::NotFound(format!("file not found: {rel}")));
+                }
+                let rootfs = Path::new(&st.rootfs_path);
+                let python_missing = !rootfs.join("usr/bin/python3").exists()
+                    && !rootfs.join("bin/python3").exists();
+                if python_missing {
+                    return Ok(crate::proto::BuildRunResponse {
+                        pty_id: 0,
+                        command: "apk add python3 py3-pip".into(),
+                        message: "python3 missing in Linux environment; install python3 py3-pip"
+                            .into(),
+                        python_missing: true,
+                    });
+                }
+                let guest_file = format!("{}/{}", guest_cwd, rel.replace('\\', "/"));
+                (format!("python3 {}", shell_escape(&guest_file)), false)
+            }
+            crate::proto::BuildKind::GenericCommand => {
+                let cmd = request.command.trim();
+                if cmd.is_empty() {
+                    return Err(CoreError::InvalidArgument("command required".into()));
+                }
+                (cmd.to_string(), false)
+            }
+            crate::proto::BuildKind::SshCommand => {
+                return Err(CoreError::InvalidArgument(
+                    "SSH command execution is scaffolded in Kotlin; use SSH transport layer".into(),
+                ));
+            }
+            _ => return Err(CoreError::InvalidArgument("build kind required".into())),
+        };
+
+        let argv = vec![
+            mgr.cache_root()
+                .join("bin/proot")
+                .to_string_lossy()
+                .into_owned(),
+            "--link2symlink".into(),
+            "-0".into(),
+            "-r".into(),
+            st.rootfs_path.clone(),
+            "-b".into(),
+            "/dev".into(),
+            "-b".into(),
+            "/proc".into(),
+            "-b".into(),
+            "/sys".into(),
+            "-b".into(),
+            format!("{}:{}", project_dir.to_string_lossy(), guest_cwd),
+            "-b".into(),
+            format!("{}:/tmp", mgr.cache_root().join("tmp").to_string_lossy()),
+            "-w".into(),
+            guest_cwd.clone(),
+            "/bin/sh".into(),
+            "-lc".into(),
+            command.clone(),
+        ];
+        let argv_json = serde_json_like_vec_encode(&argv);
+        let env_overrides = vec![
+            ("HOME".into(), "/root".into()),
+            ("TERM".into(), "xterm-256color".into()),
+            (
+                "PATH".into(),
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
+            ),
+            ("LANG".into(), "C.UTF-8".into()),
+            (
+                "TMPDIR".into(),
+                mgr.cache_root().join("tmp").to_string_lossy().into_owned(),
+            ),
+            ("FORGEBOX_LINUX_ROOTFS".into(), st.rootfs_path.clone()),
+            ("FORGEBOX_GUEST_CWD".into(), guest_cwd.clone()),
+        ];
+        let pty_id = self.pty_open_with_command(
+            Some(request.project_id.clone()),
+            Some("build".into()),
+            env_overrides,
+            request.cols.max(2) as u16,
+            request.rows.max(2) as u16,
+            12,
+            Some(argv[0].clone()),
+            Some(argv_json),
+            Some(project_dir.to_string_lossy().into_owned()),
+        )?;
+        let _ = self.audit.append(&AuditRecord {
+            ts: audit::now_iso8601(),
+            actor: "user".into(),
+            op: "build_run".into(),
+            resolved_paths: vec![guest_cwd],
+            before_hash: None,
+            after_hash: Some(command.clone()),
+            policy_result: "ALLOW".into(),
+            approval_id: None,
+            session_id: Some(pty_id.to_string()),
+        });
+        Ok(crate::proto::BuildRunResponse {
+            pty_id,
+            command,
+            message: "Build started in Linux session".into(),
+            python_missing,
+        })
+    }
+
+    fn ssh_run(
+        &self,
+        _request: crate::proto::SshRunRequest,
+    ) -> Result<crate::proto::SshRunResponse> {
+        Ok(crate::proto::SshRunResponse {
+            ok: false,
+            message: "SSH remote execution scaffolded in M12; live transport not runtime-verified under Option B (only API 28 emulator available, below minSdk 31). Use Kotlin fake-transport tests.".into(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: -1,
         })
     }
 

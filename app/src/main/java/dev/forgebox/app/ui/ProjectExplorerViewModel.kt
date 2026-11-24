@@ -24,7 +24,7 @@ data class ProjectExplorerUiState(
 )
 
 class ProjectExplorerViewModel(
-    private val repository: WorkspaceRepository,
+    val repository: WorkspaceRepository,
     private val io: CoroutineDispatcher = Dispatchers.IO,
 ) : ViewModel() {
     private val _state = MutableStateFlow(ProjectExplorerUiState())

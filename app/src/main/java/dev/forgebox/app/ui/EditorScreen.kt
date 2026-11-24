@@ -55,6 +55,8 @@ fun EditorScreen(
     initialPath: String,
     viewModel: EditorViewModel,
     onBack: () -> Unit,
+    initialLine: Int = 1,
+    initialColumn: Int = 1,
 ) {
     val state by viewModel.state.collectAsState()
     var pendingClose by remember { mutableStateOf<Int?>(null) }
@@ -68,7 +70,7 @@ fun EditorScreen(
     var terminalFraction by remember { mutableStateOf(0.4f) }
     val context = LocalContext.current
 
-    LaunchedEffect(projectId, initialPath) { viewModel.openFile(projectId, initialPath) }
+    LaunchedEffect(projectId, initialPath, initialLine, initialColumn) { viewModel.openFileAt(projectId, initialPath, initialLine, initialColumn) }
     LaunchedEffect(terminalState.open) {
         if (terminalState.open) SessionService.open(context, projectId)
     }

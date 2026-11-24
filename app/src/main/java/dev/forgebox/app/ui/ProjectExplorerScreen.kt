@@ -53,6 +53,7 @@ fun ProjectExplorerScreen(
     onBack: () -> Unit,
     onOpenFile: (String) -> Unit,
     onOpenGit: () -> Unit = {},
+    onOpenFileAt: (String, Int, Int) -> Unit = { p, _, _ -> onOpenFile(p) },
 ) {
     val state by viewModel.state.collectAsState()
     var showCreateFile by remember { mutableStateOf(false) }
@@ -62,6 +63,7 @@ fun ProjectExplorerScreen(
     var deleteTarget by remember { mutableStateOf<FileEntryModel?>(null) }
     var showLinuxEnv by remember { mutableStateOf(false) }
     var showNetwork by remember { mutableStateOf(false) }
+    var showBuild by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
 
     LaunchedEffect(projectId) { viewModel.openProject(projectId) }
@@ -218,6 +220,14 @@ fun ProjectExplorerScreen(
             confirmButton = { TextButton(onClick = { showNetwork = false }) { Text("Close") } },
         )
     }
+    if (showBuild) {
+        AlertDialog(
+            onDismissRequest = { showBuild = false },
+            title = { Text("Build / Run") },
+            text = { BuildDialogContent(projectId = projectId, repository = viewModel.repository, onOpenDiagnostic = { pth: String, l: Int, c: Int -> onOpenFileAt(pth, l, c); showBuild = false }) },
+            confirmButton = { TextButton(onClick = { showBuild = false }) { Text("Close") } },
+        )
+    }
 }
 
 private fun prepareLinuxBootstrapSource(context: android.content.Context, distro: LinuxDistroUi, mode: LinuxBootstrapModeUi): Result<String> = runCatching {
@@ -248,6 +258,19 @@ private fun prepareLinuxBootstrapSource(context: android.content.Context, distro
     outFile.absolutePath
 }
 
+
+@Composable
+private fun BuildDialogContent(projectId: String, repository: WorkspaceRepository, onOpenDiagnostic: (String, Int, Int) -> Unit) {
+    val runtime = ForgeBoxRuntime
+    val vm = remember(projectId) { BuildViewModel(RepoBuildBackend(repository, runtime)) }
+    val linuxVm = remember { LinuxEnvViewModel(repository, runtime) }
+    BuildPanel(
+        projectId = projectId,
+        viewModel = vm,
+        onOpenDiagnostic = onOpenDiagnostic,
+        onInstallPython = { linuxVm.requestPackageInstall(dev.forgebox.data.LinuxPackageManagerUi.APK, "python3 py3-pip", projectId) {} },
+    )
+}
 @Composable
 private fun LinuxEnvDialog(viewModel: LinuxEnvViewModel, projectId: String, onDismiss: () -> Unit) {
     val st by viewModel.state.collectAsState()
