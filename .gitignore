@@ -12,3 +12,11 @@ local.properties
 *.iml
 .idea/
 .DS_Store
+.kotlin/
+gradle-m12.log
+tmp_*.py
+tmp_*.txt
+_tmp_fix*.py
+*.jks
+*.keystore
+*.log
