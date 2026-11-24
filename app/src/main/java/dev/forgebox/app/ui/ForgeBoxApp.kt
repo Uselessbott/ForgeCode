@@ -4,6 +4,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -27,6 +30,8 @@ fun ForgeBoxApp() {
     var ready by remember { mutableStateOf(false) }
     var coreStatus by remember { mutableStateOf("Core: initializing...") }
     var selectedProjectId by rememberSaveable { mutableStateOf<String?>(null) }
+    val themePref = remember { ThemePreference(context.applicationContext) }
+    var themeMode by remember { mutableStateOf(themePref.getMode()) }
 
     LaunchedEffect(Unit) {
         coreStatus = withContext(Dispatchers.IO) {
@@ -49,15 +54,15 @@ fun ForgeBoxApp() {
         ready = coreStatus.startsWith("Core ")
     }
 
-    MaterialTheme {
+    ForgeBoxTheme(mode = themeMode) {
         if (!ready) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
-            return@MaterialTheme
+            return@ForgeBoxTheme
         }
 
-        val repository = remember { WorkspaceRepository(ForgeBoxRuntime) }
+        val repository = remember { WorkspaceRepository(ForgeBoxRuntime, context.applicationContext.cacheDir) }
         val credentialBroker = remember {
             runCatching {
                 val store = dev.forgebox.auth.SecureTokenStore(context.applicationContext)
@@ -72,6 +77,8 @@ fun ForgeBoxApp() {
             ProjectListScreen(
                 viewModel = vm,
                 coreStatus = coreStatus,
+                themeMode = themeMode,
+                onThemeModeChange = { mode -> themeMode = mode; themePref.setMode(mode) },
                 onOpenProject = { selectedProjectId = it },
             )
         } else if (openGit) {

@@ -13,8 +13,11 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class WorkspaceRepository(
     private val core: ForgeBoxCore,
+    private val appCacheDir: java.io.File? = null,
 ) : dev.forgebox.net.NetworkRepository {
     private val ids = AtomicInteger(1)
+
+    fun cacheDirSafe(): java.io.File = appCacheDir ?: java.io.File(System.getProperty("java.io.tmpdir"), "forgebox")
 
     fun listProjects(): Result<List<ProjectSummary>> = runCatching {
         val response = call(
@@ -321,6 +324,26 @@ class WorkspaceRepository(
                 .setRows(rows)
         )).buildRun
         BuildRunResultModel(r.ptyId, r.command, r.message, r.pythonMissing)
+    }
+
+    fun importProjectFromDir(name: String, dir: java.io.File): Result<ProjectSummary> = runCatching {
+        val project = createProject(name).getOrThrow()
+        importDirRecursive(project.id, dir, "")
+        project
+    }
+
+    private fun importDirRecursive(projectId: String, dir: java.io.File, rel: String) {
+        val children = dir.listFiles()?.sortedBy { it.name } ?: return
+        for (child in children) {
+            val childRel = if (rel.isBlank()) child.name else "$rel/${child.name}"
+            if (child.isDirectory) {
+                createFolder(projectId, childRel).getOrThrow()
+                importDirRecursive(projectId, child, childRel)
+            } else if (child.isFile) {
+                createFile(projectId, childRel).getOrThrow()
+                writeFile(projectId, childRel, child.readBytes(), 0L).getOrThrow()
+            }
+        }
     }
 
     private fun call(builder: ForgeProto.Request.Builder): ForgeProto.Response {

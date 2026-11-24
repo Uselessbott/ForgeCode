@@ -68,6 +68,25 @@ class ProjectListViewModel(
         }
     }
 
+    fun cloneFromGithub(url: String, projectName: String, onDone: (Result<Unit>) -> Unit = {}) {
+        viewModelScope.launch(io) {
+            _state.value = _state.value.copy(actionError = null)
+            val result = runCatching {
+                val spec = dev.forgebox.data.GithubRepoImporter.parse(url)
+                val name = projectName.ifBlank { dev.forgebox.data.GithubRepoImporter.defaultName(spec) }
+                val tmp = java.io.File(repository.cacheDirSafe(), "gh-" + System.currentTimeMillis() + ".zip")
+                dev.forgebox.data.GithubRepoImporter.downloadZip(spec, tmp)
+                val out = java.io.File(repository.cacheDirSafe(), "gh-" + System.currentTimeMillis() + "-unz")
+                dev.forgebox.data.GithubRepoImporter.extractZip(tmp, out)
+                repository.importProjectFromDir(name, out).getOrThrow()
+                tmp.delete(); out.deleteRecursively()
+            }
+            if (result.isFailure) _state.value = _state.value.copy(actionError = result.exceptionOrNull()?.message)
+            onDone(result.map { Unit })
+            if (result.isSuccess) refresh()
+        }
+    }
+
     fun clearActionError() {
         _state.value = _state.value.copy(actionError = null)
     }

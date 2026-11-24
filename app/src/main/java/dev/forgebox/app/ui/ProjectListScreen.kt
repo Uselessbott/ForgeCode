@@ -44,10 +44,14 @@ import java.util.Locale
 fun ProjectListScreen(
     viewModel: ProjectListViewModel,
     coreStatus: String,
+    themeMode: ThemeMode,
+    onThemeModeChange: (ThemeMode) -> Unit,
     onOpenProject: (String) -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
     var showCreate by remember { mutableStateOf(false) }
+    var showClone by remember { mutableStateOf(false) }
+    var showAddMenu by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<ProjectSummary?>(null) }
     var deleteTarget by remember { mutableStateOf<ProjectSummary?>(null) }
 
@@ -55,12 +59,23 @@ fun ProjectListScreen(
 
     Scaffold(
         floatingActionButton = {
-            FloatingActionButton(onClick = { showCreate = true }) { Text("+") }
+            Box {
+                FloatingActionButton(onClick = { showAddMenu = true }) { Text("+") }
+                androidx.compose.material3.DropdownMenu(expanded = showAddMenu, onDismissRequest = { showAddMenu = false }) {
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("New project") }, onClick = { showAddMenu = false; showCreate = true })
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Clone from GitHub URL") }, onClick = { showAddMenu = false; showClone = true })
+                }
+            }
         },
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
-            Text("Projects", style = MaterialTheme.typography.headlineSmall)
-            Text(coreStatus, style = MaterialTheme.typography.labelSmall)
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Projects", style = MaterialTheme.typography.headlineSmall)
+                    Text(coreStatus, style = MaterialTheme.typography.labelSmall)
+                }
+                ThemeModeSelector(mode = themeMode, onChange = onThemeModeChange)
+            }
             Spacer(Modifier.height(8.dp))
 
             state.actionError?.let {
@@ -98,6 +113,17 @@ fun ProjectListScreen(
             onConfirm = { name ->
                 viewModel.createProject(name) { result ->
                     if (result.isSuccess) showCreate = false
+                }
+            },
+        )
+    }
+
+    if (showClone) {
+        CloneRepoDialog(
+            onDismiss = { showClone = false },
+            onConfirm = { url, name ->
+                viewModel.cloneFromGithub(url, name) { result ->
+                    if (result.isSuccess) showClone = false
                 }
             },
         )
@@ -200,6 +226,43 @@ fun ConfirmDialog(title: String, body: String, confirmLabel: String, onDismiss: 
         title = { Text(title) },
         text = { Text(body) },
         confirmButton = { Button(onClick = onConfirm) { Text(confirmLabel) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun ThemeModeSelector(mode: ThemeMode, onChange: (ThemeMode) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        TextButton(onClick = { expanded = true }) { Text(mode.label) }
+        androidx.compose.material3.DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            ThemeMode.entries.forEach { m ->
+                androidx.compose.material3.DropdownMenuItem(
+                    text = { Text(m.label) },
+                    onClick = { expanded = false; onChange(m) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CloneRepoDialog(onDismiss: () -> Unit, onConfirm: (String, String) -> Unit) {
+    var url by remember { mutableStateOf("") }
+    var name by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Clone GitHub repo") },
+        text = {
+            Column {
+                OutlinedTextField(value = url, onValueChange = { url = it }, label = { Text("Repository URL") }, singleLine = true)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Project name (optional)") }, singleLine = true)
+                Spacer(Modifier.height(4.dp))
+                Text("Downloads repo ZIP and imports into a new project.", style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = { Button(onClick = { onConfirm(url.trim(), name.trim()) }, enabled = url.trim().isNotBlank()) { Text("Clone") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
