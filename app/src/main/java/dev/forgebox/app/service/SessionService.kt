@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import dev.forgebox.app.R
@@ -45,8 +47,13 @@ class SessionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Android 14+/OEM strictness: call startForeground immediately on service start.
-        startForeground(NOTIFICATION_ID, buildNotification())
+        // Android 14+ requires foreground service type on startForeground; call immediately.
+        val notification = buildNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
         when (intent?.action) {
             ACTION_STOP_TERMINAL -> TerminalSessionController.stop()
             ACTION_STOP_ALL -> TerminalSessionController.stopAll()
