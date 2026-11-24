@@ -352,7 +352,7 @@ class WorkspaceRepository(
                 importDirRecursive(projectId, child, childRel)
             } else if (child.isFile) {
                 createFile(projectId, childRel).getOrThrow()
-                writeFile(projectId, childRel, child.readBytes(), 0L).getOrThrow()
+                writeFile(projectId, childRel, child.readBytes()).getOrThrow()
             }
         }
     }
