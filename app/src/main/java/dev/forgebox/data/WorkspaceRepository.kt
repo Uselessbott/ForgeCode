@@ -99,6 +99,17 @@ class WorkspaceRepository(
         response.getInfo
     }
 
+    fun writeFile(projectId: String, path: String, content: ByteArray): Result<Long> = runCatching {
+        call(
+            ForgeProto.Request.newBuilder().setWriteFile(
+                ForgeProto.WriteFileRequest.newBuilder()
+                    .setProjectId(projectId)
+                    .setPath(path)
+                    .setContent(com.google.protobuf.ByteString.copyFrom(content)),
+            ),
+        ).writeFile.size.toLong()
+    }
+
     fun writeFileIfUnchanged(
         projectId: String,
         path: String,
