@@ -31,17 +31,23 @@ class SessionService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel()
+        var firstEmission = true
         scope.launch {
             TerminalSessionController.state.collect { st ->
                 val content = NotificationContentBuilder.build(st.sessions, st.activePtyId, st.sessionCap)
                 if (content.shouldStopForeground) {
-                    releaseWakeLock()
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+                    // Don't auto-stop on the initial empty state; onStartCommand already
+                    // called startForeground and the service may be intentionally started.
+                    if (!firstEmission) {
+                        releaseWakeLock()
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    }
                 } else {
                     val manager = getSystemService(NotificationManager::class.java)
                     manager.notify(NOTIFICATION_ID, buildNotification(content))
                 }
+                firstEmission = false
             }
         }
     }
