@@ -45,6 +45,8 @@ class SessionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Android 14+/OEM strictness: call startForeground immediately on service start.
+        startForeground(NOTIFICATION_ID, buildNotification())
         when (intent?.action) {
             ACTION_STOP_TERMINAL -> TerminalSessionController.stop()
             ACTION_STOP_ALL -> TerminalSessionController.stopAll()
@@ -61,7 +63,6 @@ class SessionService : Service() {
                 TerminalSessionController.open(this, projectId)
             }
         }
-        startForeground(NOTIFICATION_ID, buildNotification())
         return START_STICKY
     }
 
