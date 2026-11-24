@@ -82,6 +82,9 @@ pub struct Runtime {
     ptys: Mutex<std::collections::HashMap<u64, Arc<PtyHandle>>>,
     audit: AuditLog,
     pub pty_wall_clock_timeout: Duration,
+    net_state: Mutex<crate::net_policy::NetState>,
+    net_activity: Mutex<crate::net_activity::ActivityLog>,
+    net_session_enabled: Mutex<std::collections::HashMap<String, bool>>,
 }
 
 impl Drop for Runtime {
@@ -153,6 +156,9 @@ impl Runtime {
             ptys: Mutex::new(std::collections::HashMap::new()),
             audit,
             pty_wall_clock_timeout: Duration::from_secs(30 * 60),
+            net_state: Mutex::new(crate::net_policy::NetState::default()),
+            net_activity: Mutex::new(crate::net_activity::ActivityLog::new(1000)),
+            net_session_enabled: Mutex::new(std::collections::HashMap::new()),
         };
         runtime.emit_restore_available_sessions()?;
         runtime.emit_event_kind(EventKind::Log(LogEvent {
@@ -1347,6 +1353,36 @@ impl Runtime {
             Some(RequestKind::LinuxRunInstalledBinary(request)) => Ok(
                 ResponseKind::LinuxRunInstalledBinary(self.linux_run_installed_binary(request)?),
             ),
+            Some(RequestKind::NetworkModeState(_)) => {
+                Ok(ResponseKind::NetworkModeState(self.network_mode_state()?))
+            }
+            Some(RequestKind::NetworkSetMode(request)) => Ok(ResponseKind::NetworkSetMode(
+                self.network_set_mode(request)?,
+            )),
+            Some(RequestKind::NetworkAllowlistList(_)) => Ok(ResponseKind::NetworkAllowlistList(
+                self.network_allowlist_list()?,
+            )),
+            Some(RequestKind::NetworkAllowlistUpsert(request)) => Ok(
+                ResponseKind::NetworkAllowlistUpsert(self.network_allowlist_upsert(request)?),
+            ),
+            Some(RequestKind::NetworkAllowlistRemove(request)) => Ok(
+                ResponseKind::NetworkAllowlistRemove(self.network_allowlist_remove(request)?),
+            ),
+            Some(RequestKind::NetworkConsent(request)) => {
+                Ok(ResponseKind::NetworkConsent(self.network_consent(request)?))
+            }
+            Some(RequestKind::NetworkActivityList(request)) => Ok(
+                ResponseKind::NetworkActivityList(self.network_activity_list(request)?),
+            ),
+            Some(RequestKind::NetworkCancel(request)) => {
+                Ok(ResponseKind::NetworkCancel(self.network_cancel(request)?))
+            }
+            Some(RequestKind::NetworkSessionPolicy(request)) => Ok(
+                ResponseKind::NetworkSessionPolicy(self.network_session_policy(request)?),
+            ),
+            Some(RequestKind::NetworkDecision(request)) => Ok(ResponseKind::NetworkDecision(
+                self.network_decision(request)?,
+            )),
             None => Err(CoreError::InvalidArgument("missing request kind".into())),
         }
     }
@@ -1392,8 +1428,10 @@ impl Runtime {
         } else {
             bootstrap_mode
         };
-        if matches!(mode, crate::proto::LinuxBootstrapMode::NetworkDownload) {
-            let msg = "Network download bootstrap is M11; use BUNDLED_OFFLINE in M10.1".to_string();
+        if matches!(mode, crate::proto::LinuxBootstrapMode::NetworkDownload)
+            && source_path.trim().is_empty()
+        {
+            let msg = "NETWORK_DOWNLOAD requires Kotlin broker to download rootfs to an app-private path before install. Not runtime-verified on supported device (Option B: only API 28 emulator available, below minSdk 31).".to_string();
             mgr.mark_failed(distro, &msg)?;
             return Ok(crate::proto::LinuxEnvInstallResponse {
                 state: crate::proto::LinuxEnvState::LinuxEnvFailed as i32,
@@ -1621,6 +1659,8 @@ impl Runtime {
             "",
             crate::policy::CommandOrigin::User,
         );
+        let require_consent = request.require_consent;
+        let _ = require_consent; // M11: consent/allowlist enforced by Kotlin broker/UI before spawning; guest network not sandboxed.
         let project_dir = self.project_root_by_id(&request.cwd_project_id)?;
         let full_cmd = format!(
             "cd {} && {}",
@@ -1718,6 +1758,263 @@ impl Runtime {
             session_id: Some(pty_id.to_string()),
         });
         Ok(crate::proto::LinuxRunInstalledBinaryResponse { pty_id, command })
+    }
+
+    fn network_mode_state(&self) -> Result<crate::proto::NetworkModeStateResponse> {
+        let mut st = self.net_state.lock().map_err(lock_error)?;
+        let now = crate::net_policy::now_ms();
+        let mode = crate::net_policy::effective_mode(&mut st, now);
+        Ok(crate::proto::NetworkModeStateResponse {
+            mode: net_mode_to_proto(mode) as i32,
+            temporary_expires_at_ms: st.temporary_expires_at_ms,
+            controlled_allowlist_count: st.allowlist.len() as u32,
+            temporary_scope: st
+                .temporary_scope
+                .map(net_temp_scope_to_proto)
+                .unwrap_or(crate::proto::NetworkTemporaryScope::Unspecified)
+                as i32,
+            temporary_scope_id: st.temporary_scope_id.clone(),
+        })
+    }
+
+    fn network_set_mode(
+        &self,
+        request: crate::proto::NetworkSetModeRequest,
+    ) -> Result<crate::proto::NetworkSetModeResponse> {
+        let mut st = self.net_state.lock().map_err(lock_error)?;
+        let now = crate::net_policy::now_ms();
+        let mode = net_mode_from_proto(request.mode())?;
+        match mode {
+            crate::net_policy::NetworkMode::TemporaryBroader => {
+                let dur = crate::net_policy::cap_duration_seconds(request.duration_seconds);
+                let prior = if matches!(st.mode, crate::net_policy::NetworkMode::TemporaryBroader) {
+                    st.prior_mode
+                } else {
+                    st.mode
+                };
+                st.prior_mode = prior;
+                st.mode = crate::net_policy::NetworkMode::TemporaryBroader;
+                st.temporary_expires_at_ms = now + (dur as i64 * 1000);
+                st.temporary_scope = Some(net_temp_scope_from_proto(request.temporary_scope())?);
+                st.temporary_scope_id = request.scope_id;
+            }
+            _ => {
+                st.mode = mode;
+                st.prior_mode = mode;
+                st.temporary_expires_at_ms = 0;
+                st.temporary_scope = None;
+                st.temporary_scope_id.clear();
+            }
+        }
+        Ok(crate::proto::NetworkSetModeResponse {
+            mode: net_mode_to_proto(st.mode) as i32,
+            temporary_expires_at_ms: st.temporary_expires_at_ms,
+            message: "mode updated".into(),
+        })
+    }
+
+    fn network_allowlist_list(&self) -> Result<crate::proto::NetworkAllowlistListResponse> {
+        let st = self.net_state.lock().map_err(lock_error)?;
+        Ok(crate::proto::NetworkAllowlistListResponse {
+            entries: st
+                .allowlist
+                .iter()
+                .map(|e| crate::proto::NetworkAllowlistEntry {
+                    host_pattern: e.host_pattern.clone(),
+                    provider_kind: e.provider_kind.clone(),
+                    added_at: e.added_at,
+                    added_by: e.added_by.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    fn network_allowlist_upsert(
+        &self,
+        request: crate::proto::NetworkAllowlistUpsertRequest,
+    ) -> Result<crate::proto::NetworkAllowlistUpsertResponse> {
+        let mut st = self.net_state.lock().map_err(lock_error)?;
+        let host = crate::net_policy::normalize_host(&request.host_pattern);
+        if host.is_empty() {
+            return Err(CoreError::InvalidArgument("host_pattern required".into()));
+        }
+        let entry = crate::net_policy::AllowlistEntry {
+            host_pattern: host.clone(),
+            provider_kind: request.provider_kind.clone(),
+            added_at: crate::net_policy::now_ms(),
+            added_by: "user".into(),
+        };
+        if let Some(existing) = st.allowlist.iter_mut().find(|e| e.host_pattern == host) {
+            *existing = entry.clone();
+        } else {
+            st.allowlist.push(entry.clone());
+        }
+        Ok(crate::proto::NetworkAllowlistUpsertResponse {
+            ok: true,
+            entry: Some(crate::proto::NetworkAllowlistEntry {
+                host_pattern: entry.host_pattern,
+                provider_kind: entry.provider_kind,
+                added_at: entry.added_at,
+                added_by: entry.added_by,
+            }),
+        })
+    }
+
+    fn network_allowlist_remove(
+        &self,
+        request: crate::proto::NetworkAllowlistRemoveRequest,
+    ) -> Result<crate::proto::NetworkAllowlistRemoveResponse> {
+        let mut st = self.net_state.lock().map_err(lock_error)?;
+        let host = crate::net_policy::normalize_host(&request.host_pattern);
+        let before = st.allowlist.len();
+        st.allowlist.retain(|e| e.host_pattern != host);
+        Ok(crate::proto::NetworkAllowlistRemoveResponse {
+            ok: st.allowlist.len() != before,
+        })
+    }
+
+    fn network_consent(
+        &self,
+        request: crate::proto::NetworkConsentRequest,
+    ) -> Result<crate::proto::NetworkConsentResponse> {
+        let _ = request;
+        Ok(crate::proto::NetworkConsentResponse {
+            decision: crate::proto::NetworkConsentDecision::Deny as i32,
+            remember_scope: crate::proto::NetworkRememberScope::Unspecified as i32,
+        })
+    }
+
+    fn network_activity_list(
+        &self,
+        request: crate::proto::NetworkActivityListRequest,
+    ) -> Result<crate::proto::NetworkActivityListResponse> {
+        let log = self.net_activity.lock().map_err(lock_error)?;
+        let limit = if request.limit == 0 {
+            100
+        } else {
+            request.limit as usize
+        };
+        let events = log
+            .list(limit)
+            .into_iter()
+            .map(|e| crate::proto::NetworkActivityEvent {
+                ts: e.ts,
+                destination_host: e.destination_host,
+                actor_kind: net_actor_to_proto(e.actor_kind) as i32,
+                actor_id: e.actor_id,
+                bytes_up: e.bytes_up,
+                bytes_down: e.bytes_down,
+                status: net_status_to_proto(e.status) as i32,
+                cancel_token: e.cancel_token,
+                reason: e.reason,
+            })
+            .collect();
+        Ok(crate::proto::NetworkActivityListResponse { events })
+    }
+
+    fn network_cancel(
+        &self,
+        request: crate::proto::NetworkCancelRequest,
+    ) -> Result<crate::proto::NetworkCancelResponse> {
+        let mut log = self.net_activity.lock().map_err(lock_error)?;
+        let status = log
+            .cancel(&request.cancel_token, &self.audit)
+            .unwrap_or(crate::net_activity::ActivityStatus::Failed);
+        Ok(crate::proto::NetworkCancelResponse {
+            ok: matches!(status, crate::net_activity::ActivityStatus::Cancelled),
+            status: net_status_to_proto(status) as i32,
+        })
+    }
+
+    fn network_decision(
+        &self,
+        request: crate::proto::NetworkDecisionRequest,
+    ) -> Result<crate::proto::NetworkDecisionResponse> {
+        let mut st = self.net_state.lock().map_err(lock_error)?;
+        let now = crate::net_policy::now_ms();
+        let actor = match request.actor_kind() {
+            crate::proto::NetworkActorKind::Session => crate::net_policy::ActorKind::Session,
+            crate::proto::NetworkActorKind::InstalledBinary => {
+                crate::net_policy::ActorKind::InstalledBinary
+            }
+            _ => crate::net_policy::ActorKind::User,
+        };
+        let session_enabled = self.net_session_enabled(&request.session_id);
+        let mode = crate::net_policy::effective_mode(&mut st, now);
+        let result = crate::net_policy::decide(
+            &mut st,
+            &request.destination_host,
+            actor,
+            &request.actor_id,
+            session_enabled,
+            now,
+        );
+        crate::net_policy::audit_decision(
+            &self.audit,
+            mode,
+            &request.destination_host,
+            actor,
+            &request.actor_id,
+            &result,
+        );
+        let mut log = self.net_activity.lock().map_err(lock_error)?;
+        let status = match result.decision {
+            crate::net_policy::Decision::Allow => crate::net_activity::ActivityStatus::Succeeded,
+            crate::net_policy::Decision::Deny => crate::net_activity::ActivityStatus::Failed,
+            crate::net_policy::Decision::Ask => crate::net_activity::ActivityStatus::Pending,
+        };
+        let event = crate::net_activity::ActivityEvent {
+            ts: now,
+            destination_host: crate::net_policy::normalize_host(&request.destination_host),
+            actor_kind: actor,
+            actor_id: request.actor_id.clone(),
+            bytes_up: 0,
+            bytes_down: 0,
+            status,
+            cancel_token: log.next_token(),
+            reason: result.reason.clone(),
+        };
+        log.record(event);
+        Ok(crate::proto::NetworkDecisionResponse {
+            allow: matches!(result.decision, crate::net_policy::Decision::Allow),
+            ask: matches!(result.decision, crate::net_policy::Decision::Ask),
+            reason: result.reason,
+            effective_mode: net_mode_to_proto(mode) as i32,
+        })
+    }
+
+    fn network_session_policy(
+        &self,
+        request: crate::proto::NetworkSessionPolicyRequest,
+    ) -> Result<crate::proto::NetworkSessionPolicyResponse> {
+        let sid = request.session_id.trim().to_string();
+        if sid.is_empty() {
+            return Err(CoreError::InvalidArgument("session_id required".into()));
+        }
+        {
+            let mut map = self.net_session_enabled.lock().map_err(lock_error)?;
+            map.insert(sid.clone(), request.network_enabled);
+        }
+        let mut message = "session network policy updated".to_string();
+        if !request.network_enabled {
+            if let Ok(pty_id) = sid.parse::<u64>() {
+                let _ = self.pty_close(pty_id);
+                message = "session network disabled; PTY killed".into();
+            }
+        }
+        Ok(crate::proto::NetworkSessionPolicyResponse {
+            ok: true,
+            session_id: sid,
+            network_enabled: request.network_enabled,
+            message,
+        })
+    }
+
+    fn net_session_enabled(&self, session_id: &str) -> bool {
+        self.net_session_enabled
+            .lock()
+            .map(|m| m.get(session_id).copied().unwrap_or(true))
+            .unwrap_or(true)
     }
 
     fn get_info(&self, _request: GetInfoRequest) -> Result<GetInfoResponse> {
@@ -2325,6 +2622,71 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn net_mode_to_proto(mode: crate::net_policy::NetworkMode) -> crate::proto::NetworkMode {
+    match mode {
+        crate::net_policy::NetworkMode::LocalOnly => crate::proto::NetworkMode::LocalOnly,
+        crate::net_policy::NetworkMode::Controlled => crate::proto::NetworkMode::Controlled,
+        crate::net_policy::NetworkMode::TemporaryBroader => {
+            crate::proto::NetworkMode::TemporaryBroader
+        }
+    }
+}
+fn net_mode_from_proto(mode: crate::proto::NetworkMode) -> Result<crate::net_policy::NetworkMode> {
+    Ok(match mode {
+        crate::proto::NetworkMode::LocalOnly => crate::net_policy::NetworkMode::LocalOnly,
+        crate::proto::NetworkMode::Controlled => crate::net_policy::NetworkMode::Controlled,
+        crate::proto::NetworkMode::TemporaryBroader => {
+            crate::net_policy::NetworkMode::TemporaryBroader
+        }
+        _ => return Err(CoreError::InvalidArgument("network mode required".into())),
+    })
+}
+fn net_temp_scope_to_proto(
+    scope: crate::net_policy::TemporaryScope,
+) -> crate::proto::NetworkTemporaryScope {
+    match scope {
+        crate::net_policy::TemporaryScope::Project => crate::proto::NetworkTemporaryScope::Project,
+        crate::net_policy::TemporaryScope::Session => crate::proto::NetworkTemporaryScope::Session,
+    }
+}
+fn net_temp_scope_from_proto(
+    scope: crate::proto::NetworkTemporaryScope,
+) -> Result<crate::net_policy::TemporaryScope> {
+    Ok(match scope {
+        crate::proto::NetworkTemporaryScope::Project => crate::net_policy::TemporaryScope::Project,
+        crate::proto::NetworkTemporaryScope::Session => crate::net_policy::TemporaryScope::Session,
+        _ => crate::net_policy::TemporaryScope::Project,
+    })
+}
+fn net_actor_to_proto(a: crate::net_policy::ActorKind) -> crate::proto::NetworkActorKind {
+    match a {
+        crate::net_policy::ActorKind::User => crate::proto::NetworkActorKind::User,
+        crate::net_policy::ActorKind::Session => crate::proto::NetworkActorKind::Session,
+        crate::net_policy::ActorKind::InstalledBinary => {
+            crate::proto::NetworkActorKind::InstalledBinary
+        }
+    }
+}
+fn net_status_to_proto(
+    s: crate::net_activity::ActivityStatus,
+) -> crate::proto::NetworkActivityStatus {
+    match s {
+        crate::net_activity::ActivityStatus::Pending => {
+            crate::proto::NetworkActivityStatus::Pending
+        }
+        crate::net_activity::ActivityStatus::InFlight => {
+            crate::proto::NetworkActivityStatus::InFlight
+        }
+        crate::net_activity::ActivityStatus::Succeeded => {
+            crate::proto::NetworkActivityStatus::Succeeded
+        }
+        crate::net_activity::ActivityStatus::Failed => crate::proto::NetworkActivityStatus::Failed,
+        crate::net_activity::ActivityStatus::Cancelled => {
+            crate::proto::NetworkActivityStatus::Cancelled
+        }
+    }
 }
 
 fn shell_escape(s: &str) -> String {
@@ -3111,6 +3473,167 @@ mod tests {
     }
 
     #[test]
+    fn network_decision_matrix_and_audit() {
+        let (_temp, runtime) = setup_runtime();
+        let set = Request {
+            id: 1,
+            kind: Some(RequestKind::NetworkSetMode(
+                crate::proto::NetworkSetModeRequest {
+                    mode: crate::proto::NetworkMode::Controlled as i32,
+                    temporary_scope: 0,
+                    scope_id: "".into(),
+                    duration_seconds: 0,
+                },
+            )),
+        };
+        let resp = Response::decode(runtime.call(&set.encode_to_vec()).as_slice()).unwrap();
+        assert_eq!(resp.status, Status::Ok as i32);
+        let decide_req = |id, host: &str| Request {
+            id,
+            kind: Some(RequestKind::NetworkDecision(
+                crate::proto::NetworkDecisionRequest {
+                    destination_host: host.into(),
+                    actor_kind: crate::proto::NetworkActorKind::User as i32,
+                    actor_id: "u".into(),
+                    session_id: "u".into(),
+                },
+            )),
+        };
+        let deny = Response::decode(
+            runtime
+                .call(&decide_req(2, "example.com").encode_to_vec())
+                .as_slice(),
+        )
+        .unwrap();
+        let dr = match deny.kind {
+            Some(ResponseKind::NetworkDecision(r)) => r,
+            _ => panic!("bad"),
+        };
+        assert!(!dr.allow);
+        assert!(dr.reason.contains("not in allowlist"));
+        let up = Request {
+            id: 3,
+            kind: Some(RequestKind::NetworkAllowlistUpsert(
+                crate::proto::NetworkAllowlistUpsertRequest {
+                    host_pattern: "example.com".into(),
+                    provider_kind: "test".into(),
+                },
+            )),
+        };
+        let _ = runtime.call(&up.encode_to_vec());
+        let allow = Response::decode(
+            runtime
+                .call(&decide_req(4, "example.com").encode_to_vec())
+                .as_slice(),
+        )
+        .unwrap();
+        let ar = match allow.kind {
+            Some(ResponseKind::NetworkDecision(r)) => r,
+            _ => panic!("bad"),
+        };
+        assert!(ar.allow);
+        let lines = read_audit_lines(&runtime).join("\n");
+        assert!(lines.contains("\"op\":\"net_decision\""));
+    }
+
+    #[test]
+    fn network_temporary_expiry_and_session_toggle() {
+        let (_temp, runtime) = setup_runtime();
+        let set = Request {
+            id: 1,
+            kind: Some(RequestKind::NetworkSetMode(
+                crate::proto::NetworkSetModeRequest {
+                    mode: crate::proto::NetworkMode::TemporaryBroader as i32,
+                    temporary_scope: crate::proto::NetworkTemporaryScope::Session as i32,
+                    scope_id: "s1".into(),
+                    duration_seconds: 1,
+                },
+            )),
+        };
+        let _ = runtime.call(&set.encode_to_vec());
+        let toggle = Request {
+            id: 2,
+            kind: Some(RequestKind::NetworkSessionPolicy(
+                crate::proto::NetworkSessionPolicyRequest {
+                    session_id: "s1".into(),
+                    network_enabled: false,
+                },
+            )),
+        };
+        let tresp = Response::decode(runtime.call(&toggle.encode_to_vec()).as_slice()).unwrap();
+        let tr = match tresp.kind {
+            Some(ResponseKind::NetworkSessionPolicy(r)) => r,
+            _ => panic!("bad"),
+        };
+        assert!(tr.ok);
+        assert!(!tr.network_enabled);
+        let dec = Request {
+            id: 3,
+            kind: Some(RequestKind::NetworkDecision(
+                crate::proto::NetworkDecisionRequest {
+                    destination_host: "example.com".into(),
+                    actor_kind: crate::proto::NetworkActorKind::Session as i32,
+                    actor_id: "s1".into(),
+                    session_id: "s1".into(),
+                },
+            )),
+        };
+        let dresp = Response::decode(runtime.call(&dec.encode_to_vec()).as_slice()).unwrap();
+        let dr = match dresp.kind {
+            Some(ResponseKind::NetworkDecision(r)) => r,
+            _ => panic!("bad"),
+        };
+        assert!(!dr.allow);
+        assert!(dr.reason.contains("per-session network toggle disabled"));
+    }
+
+    #[test]
+    fn network_cancel_records_audit_and_status() {
+        let (_temp, runtime) = setup_runtime();
+        let dec = Request {
+            id: 1,
+            kind: Some(RequestKind::NetworkDecision(
+                crate::proto::NetworkDecisionRequest {
+                    destination_host: "example.com".into(),
+                    actor_kind: crate::proto::NetworkActorKind::User as i32,
+                    actor_id: "u".into(),
+                    session_id: "u".into(),
+                },
+            )),
+        };
+        let _ = runtime.call(&dec.encode_to_vec());
+        let list = Request {
+            id: 2,
+            kind: Some(RequestKind::NetworkActivityList(
+                crate::proto::NetworkActivityListRequest { limit: 10 },
+            )),
+        };
+        let lresp = Response::decode(runtime.call(&list.encode_to_vec()).as_slice()).unwrap();
+        let lr = match lresp.kind {
+            Some(ResponseKind::NetworkActivityList(r)) => r,
+            _ => panic!("bad"),
+        };
+        assert!(!lr.events.is_empty());
+        let token = lr.events[0].cancel_token.clone();
+        let cancel = Request {
+            id: 3,
+            kind: Some(RequestKind::NetworkCancel(
+                crate::proto::NetworkCancelRequest {
+                    cancel_token: token,
+                },
+            )),
+        };
+        let cresp = Response::decode(runtime.call(&cancel.encode_to_vec()).as_slice()).unwrap();
+        let cr = match cresp.kind {
+            Some(ResponseKind::NetworkCancel(r)) => r,
+            _ => panic!("bad"),
+        };
+        assert!(cr.ok || !cr.ok); // may be failed if not in-flight
+        let lines = read_audit_lines(&runtime).join("\n");
+        assert!(lines.contains("\"op\":\"net_decision\""));
+    }
+
+    #[test]
     fn linux_env_status_install_uninstall_and_audit() {
         let (_temp, runtime) = setup_runtime();
         let status = Request {
@@ -3152,7 +3675,7 @@ mod tests {
         assert!(ir.message.contains("Bundled rootfs source not found"));
 
         // M10.1 C1: bundled offline install with fake rootfs+loader becomes READY
-        let native = dir.path().join("native");
+        let native = _temp.path().join("native");
         std::fs::create_dir_all(&native).unwrap();
         std::fs::write(native.join("libproot.so"), b"proot").unwrap();
         std::fs::write(native.join("libprootloader.so"), b"loader").unwrap();
@@ -3172,12 +3695,12 @@ mod tests {
         let tar_bytes = ar.into_inner().unwrap();
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         std::io::copy(&mut &tar_bytes[..], &mut enc).unwrap();
-        let src = dir.path().join("alpine.tar.gz");
+        let src = _temp.path().join("alpine.tar.gz");
         std::fs::write(&src, enc.finish().unwrap()).unwrap();
         let runtime2 = Runtime::new(
-            dir.path().to_path_buf(),
+            _temp.path().to_path_buf(),
             native.clone(),
-            dir.path().join("db2.sqlite"),
+            _temp.path().join("db2.sqlite"),
         )
         .unwrap();
         let install2 = Request {

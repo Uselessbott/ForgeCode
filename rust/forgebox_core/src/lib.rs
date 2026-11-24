@@ -14,6 +14,8 @@ mod audit;
 mod db;
 mod git;
 mod linux_env;
+mod net_activity;
+mod net_policy;
 mod policy;
 mod pty;
 mod runtime;

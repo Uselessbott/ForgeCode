@@ -1,12 +1,19 @@
 ﻿package dev.forgebox.data
 
 import dev.forgebox.core.ForgeBoxCore
+import dev.forgebox.data.NetworkDecisionModel
+import dev.forgebox.data.NetworkModeStateModel
+import dev.forgebox.data.NetworkAllowlistEntryModel
+import dev.forgebox.data.NetworkActivityEventModel
+import dev.forgebox.data.NetworkModeUi
+import dev.forgebox.data.NetworkTemporaryScopeUi
+import dev.forgebox.data.NetworkActorKindUi
 import dev.forgebox.proto.ForgeProto
 import java.util.concurrent.atomic.AtomicInteger
 
 class WorkspaceRepository(
     private val core: ForgeBoxCore,
-) {
+) : dev.forgebox.net.NetworkRepository {
     private val ids = AtomicInteger(1)
 
     fun listProjects(): Result<List<ProjectSummary>> = runCatching {
@@ -258,12 +265,49 @@ class WorkspaceRepository(
         call(ForgeProto.Request.newBuilder().setLinuxShellSpawn(ForgeProto.LinuxShellSpawnRequest.newBuilder().setProjectId(projectId).setCols(cols).setRows(rows).setEnvJson(envJson))).linuxShellSpawn.ptyId
     }
 
-    fun linuxPackageInstall(manager: LinuxPackageManagerUi, packageSpec: String, cwdProjectId: String): Result<ForgeProto.LinuxPackageInstallResponse> = runCatching {
-        call(ForgeProto.Request.newBuilder().setLinuxPackageInstall(ForgeProto.LinuxPackageInstallRequest.newBuilder().setManager(manager.toProto()).setPackageSpec(packageSpec).setCwdProjectId(cwdProjectId))).linuxPackageInstall
+    fun linuxPackageInstall(manager: LinuxPackageManagerUi, packageSpec: String, cwdProjectId: String, requireConsent: Boolean = true): Result<ForgeProto.LinuxPackageInstallResponse> = runCatching {
+        call(ForgeProto.Request.newBuilder().setLinuxPackageInstall(ForgeProto.LinuxPackageInstallRequest.newBuilder().setManager(manager.toProto()).setPackageSpec(packageSpec).setCwdProjectId(cwdProjectId).setRequireConsent(requireConsent))).linuxPackageInstall
     }
 
     fun linuxRunInstalledBinary(projectId: String, binaryName: String, argvJson: String, approvalToken: String, commandHash: String, sessionId: String): Result<ForgeProto.LinuxRunInstalledBinaryResponse> = runCatching {
         call(ForgeProto.Request.newBuilder().setLinuxRunInstalledBinary(ForgeProto.LinuxRunInstalledBinaryRequest.newBuilder().setProjectId(projectId).setBinaryName(binaryName).setArgvJson(argvJson).setApprovalToken(approvalToken).setCommandHash(commandHash).setSessionId(sessionId))).linuxRunInstalledBinary
+    }
+
+    override fun networkModeState(): Result<NetworkModeStateModel> = runCatching {
+        call(ForgeProto.Request.newBuilder().setNetworkModeState(ForgeProto.NetworkModeStateRequest.getDefaultInstance())).networkModeState.toModel()
+    }
+
+    override fun networkSetMode(mode: NetworkModeUi, scope: NetworkTemporaryScopeUi, scopeId: String, durationSeconds: Int): Result<ForgeProto.NetworkSetModeResponse> = runCatching {
+        call(ForgeProto.Request.newBuilder().setNetworkSetMode(ForgeProto.NetworkSetModeRequest.newBuilder().setMode(mode.toProto()).setTemporaryScope(scope.toProto()).setScopeId(scopeId).setDurationSeconds(durationSeconds))).networkSetMode
+    }
+
+    override fun networkAllowlistList(): Result<List<NetworkAllowlistEntryModel>> = runCatching {
+        call(ForgeProto.Request.newBuilder().setNetworkAllowlistList(ForgeProto.NetworkAllowlistListRequest.getDefaultInstance())).networkAllowlistList.entriesList.map { it.toModel() }
+    }
+
+    override fun networkAllowlistUpsert(hostPattern: String, providerKind: String): Result<NetworkAllowlistEntryModel> = runCatching {
+        call(ForgeProto.Request.newBuilder().setNetworkAllowlistUpsert(ForgeProto.NetworkAllowlistUpsertRequest.newBuilder().setHostPattern(hostPattern).setProviderKind(providerKind))).networkAllowlistUpsert.entry.toModel()
+    }
+
+    override fun networkAllowlistRemove(hostPattern: String): Result<Boolean> = runCatching {
+        call(ForgeProto.Request.newBuilder().setNetworkAllowlistRemove(ForgeProto.NetworkAllowlistRemoveRequest.newBuilder().setHostPattern(hostPattern))).networkAllowlistRemove.ok
+    }
+
+    override fun networkActivityList(limit: Int): Result<List<NetworkActivityEventModel>> = runCatching {
+        call(ForgeProto.Request.newBuilder().setNetworkActivityList(ForgeProto.NetworkActivityListRequest.newBuilder().setLimit(limit))).networkActivityList.eventsList.map { it.toModel() }
+    }
+
+    override fun networkCancel(token: String): Result<Boolean> = runCatching {
+        call(ForgeProto.Request.newBuilder().setNetworkCancel(ForgeProto.NetworkCancelRequest.newBuilder().setCancelToken(token))).networkCancel.ok
+    }
+
+    override fun networkSessionPolicy(sessionId: String, enabled: Boolean): Result<ForgeProto.NetworkSessionPolicyResponse> = runCatching {
+        call(ForgeProto.Request.newBuilder().setNetworkSessionPolicy(ForgeProto.NetworkSessionPolicyRequest.newBuilder().setSessionId(sessionId).setNetworkEnabled(enabled))).networkSessionPolicy
+    }
+
+    override fun networkDecision(host: String, actorKind: NetworkActorKindUi, actorId: String, sessionId: String): Result<NetworkDecisionModel> = runCatching {
+        val r = call(ForgeProto.Request.newBuilder().setNetworkDecision(ForgeProto.NetworkDecisionRequest.newBuilder().setDestinationHost(host).setActorKind(actorKind.toProto()).setActorId(actorId).setSessionId(sessionId))).networkDecision
+        NetworkDecisionModel(allow = r.allow, ask = r.ask, reason = r.reason, effectiveMode = r.effectiveMode.name)
     }
 
     private fun call(builder: ForgeProto.Request.Builder): ForgeProto.Response {

@@ -478,7 +478,7 @@ Before M14, an explicit licensing review must cover: sora-editor (LGPL-2.1), tre
 | 8 | Security & supervision | Policy engine, confirmations, seccomp spike, limits, checkpoints, audit | Security suite green; isolation limits documented |
 | 9 | Git & source control | `git2` status/diff/stage/commit/history + UI + auth broker | Local flow works offline; remote flow with device flow |
 | 10 | Agent compatibility | Tool gateway, checkpoint-before-edit, diff review, remote SSH agent | Agent edit can be reviewed and restored; cancel works |
-| 11 | Networking & providers | Three modes, broker, activity UI, upload consent | Local-only works offline; no silent transfers |
+| 11 | Networking & providers | Three modes, broker, activity UI, upload consent | Local-only works offline; no silent transfers; **M11 delivered in code/host tests (Option B runtime unverified)** |
 | 12 | Build & test environment | Python/Rust/Node/C/C++ via runtime packs, PRoot or SSH; diagnostics | Real builds for at least Python and one compiled language |
 | 13 | Checkpoints/recovery/backups | Full snapshot/diff/restore, crash replay, project backups | Restore after agent damage verified |
 | 14 | Audit, performance, release | Security audit, perf tuning, licence review, signed release | Critical failures = release blocker; docs state limitations |

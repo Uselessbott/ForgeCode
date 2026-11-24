@@ -32,7 +32,7 @@ class LinuxEnvViewModel(
     private val repository: WorkspaceRepository,
     private val runtime: dev.forgebox.core.ForgeBoxRuntime? = null,
     private val pollIntervalMs: Long = 500L,
-    private val bundledSourceProvider: ((LinuxDistroUi) -> Result<String>)? = null,
+    private val sourcePathProvider: ((LinuxDistroUi, LinuxBootstrapModeUi) -> Result<String>)? = null,
 ) : ViewModel() {
     private val _state = MutableStateFlow(LinuxEnvUiStateModel())
     val state: StateFlow<LinuxEnvUiStateModel> = _state.asStateFlow()
@@ -47,16 +47,16 @@ class LinuxEnvViewModel(
         }
     }
 
-    fun install(distro: LinuxDistroUi) {
+    fun install(distro: LinuxDistroUi, bootstrapMode: LinuxBootstrapModeUi = LinuxBootstrapModeUi.BUNDLED_OFFLINE) {
         viewModelScope.launch(Dispatchers.IO) {
-            _state.value = _state.value.copy(loading = true, error = null, progressPercent = 0, progressMessage = "Preparing bundled rootfs...")
-            val source = bundledSourceProvider?.invoke(distro) ?: Result.failure(IllegalStateException("Bundled source provider unavailable"))
+            _state.value = _state.value.copy(loading = true, error = null, progressPercent = 0, progressMessage = "Preparing bootstrap source...")
+            val source = sourcePathProvider?.invoke(distro, bootstrapMode) ?: Result.success("")
             val sourcePath = source.getOrElse { e ->
-                _state.value = _state.value.copy(loading = false, error = e.message ?: "Failed to prepare bundled rootfs")
+                _state.value = _state.value.copy(loading = false, error = e.message ?: "Failed to prepare bootstrap source")
                 return@launch
             }
             startProgressPoll()
-            repository.linuxEnvInstall(distro, LinuxBootstrapModeUi.BUNDLED_OFFLINE, sourcePath)
+            repository.linuxEnvInstall(distro, bootstrapMode, sourcePath)
                 .onSuccess { resp ->
                     _state.value = _state.value.copy(
                         progressMessage = resp.message,

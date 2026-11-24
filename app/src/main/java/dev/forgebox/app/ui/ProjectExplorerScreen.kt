@@ -38,9 +38,11 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.forgebox.data.FileEntryModel
+import dev.forgebox.data.LinuxBootstrapModeUi
 import dev.forgebox.data.LinuxDistroUi
 import dev.forgebox.data.LinuxEnvUiState
 import dev.forgebox.data.WorkspaceRepository
+import dev.forgebox.net.NetworkBroker
 import dev.forgebox.core.ForgeBoxRuntime
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -59,6 +61,7 @@ fun ProjectExplorerScreen(
     var renameTarget by remember { mutableStateOf<FileEntryModel?>(null) }
     var deleteTarget by remember { mutableStateOf<FileEntryModel?>(null) }
     var showLinuxEnv by remember { mutableStateOf(false) }
+    var showNetwork by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
 
     LaunchedEffect(projectId) { viewModel.openProject(projectId) }
@@ -81,6 +84,7 @@ fun ProjectExplorerScreen(
                 }
                 TextButton(onClick = onOpenGit) { Text("Git") }
                 TextButton(onClick = { showLinuxEnv = true }) { Text("Linux") }
+                TextButton(onClick = { showNetwork = true }) { Text("Network") }
                 TextButton(onClick = { viewModel.refresh() }) { Text("Refresh") }
             }
 
@@ -200,26 +204,46 @@ fun ProjectExplorerScreen(
             LinuxEnvViewModel(
                 repository = WorkspaceRepository(ForgeBoxRuntime),
                 runtime = ForgeBoxRuntime,
-                bundledSourceProvider = { distro -> prepareBundledLinuxAsset(context, distro) },
+                sourcePathProvider = { distro, mode -> prepareLinuxBootstrapSource(context, distro, mode) },
             )
         }
         LinuxEnvDialog(viewModel = linuxVm, projectId = projectId, onDismiss = { showLinuxEnv = false })
     }
+    if (showNetwork) {
+        val netVm = remember { NetworkViewModel(NetworkBroker(WorkspaceRepository(ForgeBoxRuntime))) }
+        AlertDialog(
+            onDismissRequest = { showNetwork = false },
+            title = { Text("Network") },
+            text = { Box(Modifier.fillMaxWidth().height(520.dp)) { NetworkScreen(netVm, sessionId = projectId) } },
+            confirmButton = { TextButton(onClick = { showNetwork = false }) { Text("Close") } },
+        )
+    }
 }
 
-private fun prepareBundledLinuxAsset(context: android.content.Context, distro: LinuxDistroUi): Result<String> = runCatching {
-    if (distro != LinuxDistroUi.ALPINE) error("M10.1 bundled offline install supports Alpine only. NETWORK_DOWNLOAD is M11.")
+private fun prepareLinuxBootstrapSource(context: android.content.Context, distro: LinuxDistroUi, mode: LinuxBootstrapModeUi): Result<String> = runCatching {
+    if (distro != LinuxDistroUi.ALPINE) error("Only Alpine bootstrap is supported in this build.")
     val arch = when (android.os.Build.SUPPORTED_ABIS.firstOrNull().orEmpty()) {
         "arm64-v8a", "aarch64" -> "aarch64"
         "x86_64" -> "x86_64"
-        else -> error("Unsupported ABI for bundled Alpine rootfs: ${android.os.Build.SUPPORTED_ABIS.joinToString()}")
+        else -> error("Unsupported ABI for Alpine rootfs: ${android.os.Build.SUPPORTED_ABIS.joinToString()}")
     }
-    val assetName = "linux/alpine-minirootfs-3.20.7-$arch.tar.gz"
+    val fileName = "alpine-minirootfs-3.20.7-$arch.tar.gz"
     val outDir = java.io.File(context.filesDir, "ForgeBox/Cache/linux/bootstrap")
     if (!outDir.exists()) outDir.mkdirs()
-    val outFile = java.io.File(outDir, assetName.substringAfterLast('/'))
-    context.assets.open(assetName).use { input ->
-        outFile.outputStream().use { output -> input.copyTo(output) }
+    val outFile = java.io.File(outDir, fileName)
+    if (mode == LinuxBootstrapModeUi.BUNDLED_OFFLINE) {
+        val assetName = "linux/$fileName"
+        context.assets.open(assetName).use { input -> outFile.outputStream().use { output -> input.copyTo(output) } }
+        return@runCatching outFile.absolutePath
+    }
+    // NETWORK_DOWNLOAD: fetch through M11 broker (policy/consent/allowlist) on the app side.
+    val broker = NetworkBroker(WorkspaceRepository(ForgeBoxRuntime))
+    val url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/$arch/$fileName"
+    val req = okhttp3.Request.Builder().url(url).build()
+    broker.execute(req, actorKind = dev.forgebox.data.NetworkActorKindUi.USER, actorId = "linux-bootstrap", sessionId = "linux-bootstrap", requireConsent = true, providerKind = "alpine-rootfs").use { resp ->
+        if (!resp.isSuccessful) error("Download failed: HTTP ${resp.code}")
+        val body = resp.body ?: error("Download failed: empty body")
+        outFile.outputStream().use { output -> body.byteStream().copyTo(output) }
     }
     outFile.absolutePath
 }
@@ -255,19 +279,21 @@ private fun LinuxEnvDialog(viewModel: LinuxEnvViewModel, projectId: String, onDi
                 }
                 st.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { viewModel.install(LinuxDistroUi.ALPINE) }, enabled = !st.loading) { Text("Install Alpine (offline)") }
+                    TextButton(onClick = { viewModel.install(LinuxDistroUi.ALPINE, LinuxBootstrapModeUi.BUNDLED_OFFLINE) }, enabled = !st.loading) { Text("Install Alpine (bundled)") }
+                    TextButton(onClick = { viewModel.install(LinuxDistroUi.ALPINE, LinuxBootstrapModeUi.NETWORK_DOWNLOAD) }, enabled = !st.loading) { Text("Download (M11)") }
                 }
-                Text("Bundled offline bootstrap only in M10.1. Network download is deferred to M11.", style = MaterialTheme.typography.labelSmall)
+                Text("Bundled offline bootstrap remains default. NETWORK_DOWNLOAD path exists in proto/policy but is not runtime-verified on supported device (Option B).", style = MaterialTheme.typography.labelSmall)
                 TextButton(onClick = { viewModel.uninstall() }, enabled = !st.loading && st.status?.state == LinuxEnvUiState.READY) { Text("Uninstall") }
                 var pkg by remember { mutableStateOf("@mmmbuto/codex-cli-termux") }
                 OutlinedTextField(value = pkg, onValueChange = { pkg = it }, label = { Text("Package spec") }, singleLine = true)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = { viewModel.requestPackageInstall(dev.forgebox.data.LinuxPackageManagerUi.APK, pkg, projectId) }) { Text("apk add (PTY)") }
                 }
-                Text("Package install spawns a normal terminal command. Offline mode: network-required installs will fail honestly; M11 enables network bootstrap/package installs.", style = MaterialTheme.typography.labelSmall)
+                Text("Package install spawns a normal terminal command. Network access is governed by M11 broker/mode; guest sockets inside PRoot are not sandboxed.", style = MaterialTheme.typography.labelSmall)
                 Text("No emulator runtime verification on a supported device; only API 28 emulator available (below minSdk 31).", style = MaterialTheme.typography.labelSmall)
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
     )
+
 }

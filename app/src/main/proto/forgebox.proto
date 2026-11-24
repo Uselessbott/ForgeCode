@@ -56,6 +56,16 @@ message Request {
     LinuxShellSpawnRequest linux_shell_spawn = 43;
     LinuxPackageInstallRequest linux_package_install = 44;
     LinuxRunInstalledBinaryRequest linux_run_installed_binary = 45;
+    NetworkModeStateRequest network_mode_state = 46;
+    NetworkSetModeRequest network_set_mode = 47;
+    NetworkAllowlistListRequest network_allowlist_list = 48;
+    NetworkAllowlistUpsertRequest network_allowlist_upsert = 49;
+    NetworkAllowlistRemoveRequest network_allowlist_remove = 50;
+    NetworkConsentRequest network_consent = 51;
+    NetworkActivityListRequest network_activity_list = 52;
+    NetworkCancelRequest network_cancel = 53;
+    NetworkSessionPolicyRequest network_session_policy = 54;
+    NetworkDecisionRequest network_decision = 55;
   }
 }
 
@@ -108,6 +118,16 @@ message Response {
     LinuxShellSpawnResponse linux_shell_spawn = 45;
     LinuxPackageInstallResponse linux_package_install = 46;
     LinuxRunInstalledBinaryResponse linux_run_installed_binary = 47;
+    NetworkModeStateResponse network_mode_state = 48;
+    NetworkSetModeResponse network_set_mode = 49;
+    NetworkAllowlistListResponse network_allowlist_list = 50;
+    NetworkAllowlistUpsertResponse network_allowlist_upsert = 51;
+    NetworkAllowlistRemoveResponse network_allowlist_remove = 52;
+    NetworkConsentResponse network_consent = 53;
+    NetworkActivityListResponse network_activity_list = 54;
+    NetworkCancelResponse network_cancel = 55;
+    NetworkSessionPolicyResponse network_session_policy = 56;
+    NetworkDecisionResponse network_decision = 57;
   }
 }
 
@@ -513,6 +533,7 @@ message LinuxPackageInstallRequest {
   LinuxPackageManager manager = 1;
   string package_spec = 2;
   string cwd_project_id = 3;
+  bool require_consent = 4; // default true for npm/apt/apk; UI may pass false for offline dry-run
 }
 
 message LinuxPackageInstallResponse {
@@ -532,4 +553,171 @@ message LinuxRunInstalledBinaryRequest {
 message LinuxRunInstalledBinaryResponse {
   uint64 pty_id = 1;
   string command = 2;
+}
+
+// ==================== M11 Network Broker ====================
+
+enum NetworkMode {
+  NETWORK_MODE_UNSPECIFIED = 0;
+  NETWORK_MODE_LOCAL_ONLY = 1;
+  NETWORK_MODE_CONTROLLED = 2;
+  NETWORK_MODE_TEMPORARY_BROADER = 3;
+}
+
+enum NetworkTemporaryScope {
+  NETWORK_TEMPORARY_SCOPE_UNSPECIFIED = 0;
+  NETWORK_TEMPORARY_SCOPE_PROJECT = 1;
+  NETWORK_TEMPORARY_SCOPE_SESSION = 2;
+}
+
+enum NetworkActorKind {
+  NETWORK_ACTOR_KIND_UNSPECIFIED = 0;
+  NETWORK_ACTOR_KIND_USER = 1;
+  NETWORK_ACTOR_KIND_SESSION = 2;
+  NETWORK_ACTOR_KIND_INSTALLED_BINARY = 3;
+}
+
+enum NetworkConsentDecision {
+  NETWORK_CONSENT_DECISION_UNSPECIFIED = 0;
+  NETWORK_CONSENT_DECISION_ALLOW_ONCE = 1;
+  NETWORK_CONSENT_DECISION_ALLOW_REMEMBER = 2;
+  NETWORK_CONSENT_DECISION_DENY = 3;
+}
+
+enum NetworkRememberScope {
+  NETWORK_REMEMBER_SCOPE_UNSPECIFIED = 0;
+  NETWORK_REMEMBER_SCOPE_PROJECT = 1;
+  NETWORK_REMEMBER_SCOPE_GLOBAL = 2;
+}
+
+enum NetworkActivityStatus {
+  NETWORK_ACTIVITY_STATUS_UNSPECIFIED = 0;
+  NETWORK_ACTIVITY_STATUS_PENDING = 1;
+  NETWORK_ACTIVITY_STATUS_IN_FLIGHT = 2;
+  NETWORK_ACTIVITY_STATUS_SUCCEEDED = 3;
+  NETWORK_ACTIVITY_STATUS_FAILED = 4;
+  NETWORK_ACTIVITY_STATUS_CANCELLED = 5;
+}
+
+message NetworkModeStateRequest {}
+
+message NetworkModeStateResponse {
+  NetworkMode mode = 1;
+  int64 temporary_expires_at_ms = 2;
+  uint32 controlled_allowlist_count = 3;
+  NetworkTemporaryScope temporary_scope = 4;
+  string temporary_scope_id = 5;
+}
+
+message NetworkSetModeRequest {
+  NetworkMode mode = 1;
+  NetworkTemporaryScope temporary_scope = 2;
+  string scope_id = 3;
+  uint32 duration_seconds = 4;
+}
+
+message NetworkSetModeResponse {
+  NetworkMode mode = 1;
+  int64 temporary_expires_at_ms = 2;
+  string message = 3;
+}
+
+message NetworkAllowlistEntry {
+  string host_pattern = 1;
+  string provider_kind = 2;
+  int64 added_at = 3;
+  string added_by = 4;
+}
+
+message NetworkAllowlistListRequest {}
+
+message NetworkAllowlistListResponse {
+  repeated NetworkAllowlistEntry entries = 1;
+}
+
+message NetworkAllowlistUpsertRequest {
+  string host_pattern = 1;
+  string provider_kind = 2;
+}
+
+message NetworkAllowlistUpsertResponse {
+  bool ok = 1;
+  NetworkAllowlistEntry entry = 2;
+}
+
+message NetworkAllowlistRemoveRequest {
+  string host_pattern = 1;
+}
+
+message NetworkAllowlistRemoveResponse {
+  bool ok = 1;
+}
+
+message NetworkConsentRequest {
+  string destination_host = 1;
+  string provider_kind = 2;
+  uint32 file_count = 3;
+  uint64 byte_estimate = 4;
+  NetworkActorKind requesting_actor = 5;
+  string requesting_id = 6;
+}
+
+message NetworkConsentResponse {
+  NetworkConsentDecision decision = 1;
+  NetworkRememberScope remember_scope = 2;
+}
+
+message NetworkActivityEvent {
+  int64 ts = 1;
+  string destination_host = 2;
+  NetworkActorKind actor_kind = 3;
+  string actor_id = 4;
+  uint64 bytes_up = 5;
+  uint64 bytes_down = 6;
+  NetworkActivityStatus status = 7;
+  string cancel_token = 8;
+  string reason = 9;
+}
+
+message NetworkActivityListRequest {
+  uint32 limit = 1;
+}
+
+message NetworkActivityListResponse {
+  repeated NetworkActivityEvent events = 1;
+}
+
+message NetworkCancelRequest {
+  string cancel_token = 1;
+}
+
+message NetworkCancelResponse {
+  bool ok = 1;
+  NetworkActivityStatus status = 2;
+}
+
+message NetworkSessionPolicyRequest {
+  string session_id = 1;
+  bool network_enabled = 2;
+}
+
+message NetworkSessionPolicyResponse {
+  bool ok = 1;
+  string session_id = 2;
+  bool network_enabled = 3;
+  string message = 4;
+}
+
+message NetworkDecisionRequest {
+  string destination_host = 1;
+  NetworkActorKind actor_kind = 2;
+  string actor_id = 3;
+  string session_id = 4;
+}
+
+message NetworkDecisionResponse {
+  bool allow = 1;
+  bool ask = 2;
+  string reason = 3;
+  NetworkMode effective_mode = 4;
 }
