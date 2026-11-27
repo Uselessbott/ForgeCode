@@ -1,4 +1,4 @@
-package dev.forgebox.app.terminal
+﻿package dev.forgebox.app.terminal
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -84,8 +84,8 @@ fun TerminalPanel(
                             color = if (selected) Color.White else Color(0xFFBBBBBB),
                         )
                     }
-                    TextButton(onClick = { renameId = s.ptyId; renameText = s.name }) { Text("✎", color = Color(0xFFAAAAAA)) }
-                    TextButton(onClick = { onCloseSession(s.ptyId) }) { Text("×", color = Color(0xFFAAAAAA)) }
+                    TextButton(onClick = { renameId = s.ptyId; renameText = s.name }) { Text("âœŽ", color = Color(0xFFAAAAAA)) }
+                    TextButton(onClick = { onCloseSession(s.ptyId) }) { Text("Ã—", color = Color(0xFFAAAAAA)) }
                 }
             }
             TextButton(onClick = onStop) { Text("Stop") }

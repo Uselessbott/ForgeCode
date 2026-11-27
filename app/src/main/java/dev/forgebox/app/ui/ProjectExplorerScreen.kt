@@ -82,8 +82,8 @@ fun ProjectExplorerScreen(
     val linuxState by linuxVm.state.collectAsState()
 
     LaunchedEffect(projectId) { viewModel.openProject(projectId); linuxVm.refresh() }
-    LaunchedEffect(terminalState.open, bottomPanel, linuxState.status?.state) {
-        if ((terminalState.open || bottomPanel == "Terminal") && linuxState.status?.state == LinuxEnvUiState.NOT_INSTALLED) {
+    LaunchedEffect(projectId, linuxState.status?.state, linuxState.loading) {
+        if (linuxState.status?.state == LinuxEnvUiState.NOT_INSTALLED && !linuxState.loading) {
             linuxVm.install(LinuxDistroUi.ALPINE, LinuxBootstrapModeUi.BUNDLED_OFFLINE)
         }
     }
@@ -160,24 +160,33 @@ fun ProjectExplorerScreen(
                             onOpenFile = { path -> editorVm.openFile(projectId, path); bottomPanel = "" },
                             onAction = { actionTarget = it },
                         )
-                        "Terminal" -> dev.forgebox.app.terminal.TerminalPanel(
-                            state = terminalState,
-                            onCreate = { dev.forgebox.app.terminal.TerminalSessionController.createSession(projectId) },
-                            onSelect = dev.forgebox.app.terminal.TerminalSessionController::select,
-                            onRename = dev.forgebox.app.terminal.TerminalSessionController::rename,
-                            onWrite = dev.forgebox.app.terminal.TerminalSessionController::write,
-                            onWriteBytes = dev.forgebox.app.terminal.TerminalSessionController::writeBytes,
-                            onSignal = dev.forgebox.app.terminal.TerminalSessionController::signal,
-                            onStop = dev.forgebox.app.terminal.TerminalSessionController::stop,
-                            onStopAll = dev.forgebox.app.terminal.TerminalSessionController::stopAll,
-                            onCloseSession = dev.forgebox.app.terminal.TerminalSessionController::closeSession,
-                            onRecreate = dev.forgebox.app.terminal.TerminalSessionController::recreateRestorable,
-                            onDismissRestore = dev.forgebox.app.terminal.TerminalSessionController::dismissRestoreBanner,
-                            onApproveApproval = dev.forgebox.app.terminal.TerminalSessionController::approvePending,
-                            onDenyApproval = dev.forgebox.app.terminal.TerminalSessionController::denyPending,
-                            onShellKindChange = dev.forgebox.app.terminal.TerminalSessionController::setPreferredShellKind,
-                            modifier = Modifier.fillMaxSize(),
-                        )
+                        "Terminal" -> Column(Modifier.fillMaxSize()) {
+                            if (linuxState.status?.state == LinuxEnvUiState.INSTALLING || linuxState.progressMessage.isNotBlank()) {
+                                Text(
+                                    "Linux bootstrap: ${linuxState.progressPercent}% ${linuxState.progressMessage}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                )
+                            }
+                            dev.forgebox.app.terminal.TerminalPanel(
+                                state = terminalState,
+                                onCreate = { dev.forgebox.app.terminal.TerminalSessionController.createSession(projectId) },
+                                onSelect = dev.forgebox.app.terminal.TerminalSessionController::select,
+                                onRename = dev.forgebox.app.terminal.TerminalSessionController::rename,
+                                onWrite = dev.forgebox.app.terminal.TerminalSessionController::write,
+                                onWriteBytes = dev.forgebox.app.terminal.TerminalSessionController::writeBytes,
+                                onSignal = dev.forgebox.app.terminal.TerminalSessionController::signal,
+                                onStop = dev.forgebox.app.terminal.TerminalSessionController::stop,
+                                onStopAll = dev.forgebox.app.terminal.TerminalSessionController::stopAll,
+                                onCloseSession = dev.forgebox.app.terminal.TerminalSessionController::closeSession,
+                                onRecreate = dev.forgebox.app.terminal.TerminalSessionController::recreateRestorable,
+                                onDismissRestore = dev.forgebox.app.terminal.TerminalSessionController::dismissRestoreBanner,
+                                onApproveApproval = dev.forgebox.app.terminal.TerminalSessionController::approvePending,
+                                onDenyApproval = dev.forgebox.app.terminal.TerminalSessionController::denyPending,
+                                onShellKindChange = dev.forgebox.app.terminal.TerminalSessionController::setPreferredShellKind,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
                         "Output" -> WorkspaceOutputPanel(projectId = projectId, repository = viewModel.repository, onOpenDiagnostic = { p, l, c -> editorVm.openFileAt(projectId, p, l, c); bottomPanel = "" })
                     }
                 }
