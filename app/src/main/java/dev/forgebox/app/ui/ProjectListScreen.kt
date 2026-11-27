@@ -165,7 +165,7 @@ private fun ProjectCard(project: ProjectSummary, onClick: () -> Unit, onLongClic
         Column(Modifier.padding(16.dp)) {
             Text(project.name, style = MaterialTheme.typography.titleMedium)
             Text(
-                "Created ${formatDate(project.createdAt)} · ${formatBytes(project.storageBytes)}",
+                "Created ${formatDate(project.createdAt)} | ${formatBytes(project.storageBytes)}",
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(

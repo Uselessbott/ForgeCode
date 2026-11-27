@@ -45,7 +45,7 @@ fun ForgeBoxApp() {
                 )
                 if (response.status == ForgeProto.Status.OK && response.hasGetInfo()) {
                     val info = response.getInfo
-                    "Core ${info.version} Â· ${info.projectCount} projects"
+                    "Core ${info.version} | ${info.projectCount} projects"
                 } else {
                     "Core error: ${response.error.code} ${response.error.message}"
                 }

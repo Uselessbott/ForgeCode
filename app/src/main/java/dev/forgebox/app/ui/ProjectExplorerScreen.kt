@@ -64,6 +64,7 @@ fun ProjectExplorerScreen(
     var showLinuxEnv by remember { mutableStateOf(false) }
     var showNetwork by remember { mutableStateOf(false) }
     var showBuild by remember { mutableStateOf(false) }
+    var showOverflow by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
 
     LaunchedEffect(projectId) { viewModel.openProject(projectId) }
@@ -81,13 +82,47 @@ fun ProjectExplorerScreen(
                 TextButton(onClick = onBack) { Text("Back") }
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(projectId, style = MaterialTheme.typography.titleLarge)
-                    Text("Project-relative paths only. Rust VFS validates all operations.", style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        projectId,
+                        style = MaterialTheme.typography.titleLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        "Project-relative paths only. Rust VFS validates all operations.",
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
-                TextButton(onClick = onOpenGit) { Text("Git") }
-                TextButton(onClick = { showLinuxEnv = true }) { Text("Linux") }
-                TextButton(onClick = { showNetwork = true }) { Text("Network") }
-                TextButton(onClick = { viewModel.refresh() }) { Text("Refresh") }
+                Box {
+                    TextButton(onClick = { showOverflow = true }) { Text("\u22EE") }
+                    androidx.compose.material3.DropdownMenu(
+                        expanded = showOverflow,
+                        onDismissRequest = { showOverflow = false },
+                    ) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Git") },
+                            onClick = { showOverflow = false; onOpenGit() },
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Linux") },
+                            onClick = { showOverflow = false; showLinuxEnv = true },
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Network") },
+                            onClick = { showOverflow = false; showNetwork = true },
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Build / Run") },
+                            onClick = { showOverflow = false; showBuild = true },
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Refresh") },
+                            onClick = { showOverflow = false; viewModel.refresh() },
+                        )
+                    }
+                }
             }
 
             state.actionError?.let {
