@@ -70,22 +70,24 @@ class WorkspaceRepository(
     }
 
     fun readFile(projectId: String, path: String): Result<ByteArray> = runCatching {
+        val p = normalizeRelPath(path)
         val response = call(
             ForgeProto.Request.newBuilder().setReadFile(
                 ForgeProto.ReadFileRequest.newBuilder()
                     .setProjectId(projectId)
-                    .setPath(path),
+                    .setPath(p),
             ),
         )
         response.readFile.content.toByteArray()
     }
 
     fun statFile(projectId: String, path: String): Result<FileStatModel> = runCatching {
+        val p = normalizeRelPath(path)
         val response = call(
             ForgeProto.Request.newBuilder().setStatFile(
                 ForgeProto.StatFileRequest.newBuilder()
                     .setProjectId(projectId)
-                    .setPath(path),
+                    .setPath(p),
             ),
         )
         val s = response.statFile
@@ -100,11 +102,12 @@ class WorkspaceRepository(
     }
 
     fun writeFile(projectId: String, path: String, content: ByteArray): Result<Long> = runCatching {
+        val p = normalizeRelPath(path)
         call(
             ForgeProto.Request.newBuilder().setWriteFile(
                 ForgeProto.WriteFileRequest.newBuilder()
                     .setProjectId(projectId)
-                    .setPath(path)
+                    .setPath(p)
                     .setContent(com.google.protobuf.ByteString.copyFrom(content)),
             ),
         ).writeFile.size.toLong()
@@ -128,24 +131,31 @@ class WorkspaceRepository(
         response.writeFileIfUnchanged.mtimeMillis
     }
 
+    private fun normalizeRelPath(path: String): String =
+        path.trim().removePrefix("/").replace('\\', '/').trim('/').ifBlank { path.trim() }
+
     fun createFile(projectId: String, relPath: String, content: ByteArray = ByteArray(0)): Result<Unit> =
         runCatching {
+            val path = normalizeRelPath(relPath)
+            require(path.isNotBlank()) { "Path cannot be empty" }
             call(
                 ForgeProto.Request.newBuilder().setWriteFile(
                     ForgeProto.WriteFileRequest.newBuilder()
                         .setProjectId(projectId)
-                        .setPath(relPath)
+                        .setPath(path)
                         .setContent(com.google.protobuf.ByteString.copyFrom(content)),
                 ),
             )
         }
 
     fun createFolder(projectId: String, relPath: String): Result<Unit> = runCatching {
+        val path = normalizeRelPath(relPath)
+        require(path.isNotBlank()) { "Path cannot be empty" }
         call(
             ForgeProto.Request.newBuilder().setCreateFolder(
                 ForgeProto.CreateFolderRequest.newBuilder()
                     .setProjectId(projectId)
-                    .setPath(relPath),
+                    .setPath(path),
             ),
         )
     }
@@ -155,8 +165,8 @@ class WorkspaceRepository(
             ForgeProto.Request.newBuilder().setRenameFile(
                 ForgeProto.RenameFileRequest.newBuilder()
                     .setProjectId(projectId)
-                    .setOldPath(oldRel)
-                    .setNewPath(newRel),
+                    .setOldPath(normalizeRelPath(oldRel))
+                    .setNewPath(normalizeRelPath(newRel)),
             ),
         )
     }
@@ -166,7 +176,7 @@ class WorkspaceRepository(
             ForgeProto.Request.newBuilder().setDeletePath(
                 ForgeProto.DeletePathRequest.newBuilder()
                     .setProjectId(projectId)
-                    .setPath(relPath)
+                    .setPath(normalizeRelPath(relPath))
                     .setRecursive(recursive),
             ),
         )

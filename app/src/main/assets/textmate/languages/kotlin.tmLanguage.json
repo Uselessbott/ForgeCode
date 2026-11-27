@@ -1,0 +1,75 @@
+{
+  "scopeName": "source.kotlin",
+  "patterns": [
+    {
+      "name": "comment.line",
+      "match": "//.*$"
+    },
+    {
+      "name": "comment.block",
+      "begin": "/\\*",
+      "end": "\\*/"
+    },
+    {
+      "name": "string.quoted.triple",
+      "begin": "\"\"\"",
+      "end": "\"\"\""
+    },
+    {
+      "name": "string.quoted.double",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "string.quoted.single",
+      "begin": "'",
+      "end": "'",
+      "patterns": [
+        {
+          "name": "constant.character.escape",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "constant.numeric",
+      "match": "\\b(?:0x[0-9A-Fa-f_]+|0b[01_]+|[0-9][0-9_]*(?:\\.[0-9_]+)?(?:[eE][+-]?[0-9_]+)?)\\b"
+    },
+    {
+      "name": "keyword.control.import",
+      "match": "\\b(?:import|package)\\b"
+    },
+    {
+      "name": "keyword.control",
+      "match": "\\b(?:if|else|for|while|do|when|break|continue|return|try|catch|finally|throw|class|interface|object|fun|val|var|package|import|as|is|in|out|override|public|private|protected|internal|companion|data|sealed|suspend)\\b"
+    },
+    {
+      "name": "constant.language",
+      "match": "\\b(?:true|false|null|this|super)\\b"
+    },
+    {
+      "name": "entity.name.type.class",
+      "match": "\\b(?:class|interface|object)\\s+([A-Za-z_][\\w]*)",
+      "captures": {
+        "1": {
+          "name": "entity.name.class"
+        }
+      }
+    },
+    {
+      "name": "entity.name.function",
+      "match": "\\bfun\\s+([A-Za-z_][\\w]*)",
+      "captures": {
+        "1": {
+          "name": "entity.name.function"
+        }
+      }
+    }
+  ]
+}

@@ -59,21 +59,12 @@ fun ProjectListScreen(
 
     Scaffold(
         floatingActionButton = {
-            Box {
-                FloatingActionButton(onClick = { showAddMenu = true }) { Text("+") }
-                androidx.compose.material3.DropdownMenu(expanded = showAddMenu, onDismissRequest = { showAddMenu = false }) {
-                    androidx.compose.material3.DropdownMenuItem(text = { Text("New project") }, onClick = { showAddMenu = false; showCreate = true })
-                    androidx.compose.material3.DropdownMenuItem(text = { Text("Clone from GitHub URL") }, onClick = { showAddMenu = false; showClone = true })
-                }
-            }
+            FloatingActionButton(onClick = { showCreate = true }) { Text("+") }
         },
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Projects", style = MaterialTheme.typography.headlineSmall)
-                    Text(coreStatus, style = MaterialTheme.typography.labelSmall)
-                }
+                Text("Projects", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
                 ThemeModeSelector(mode = themeMode, onChange = onThemeModeChange)
             }
             Spacer(Modifier.height(8.dp))

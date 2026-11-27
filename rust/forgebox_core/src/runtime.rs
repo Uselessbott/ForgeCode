@@ -1488,7 +1488,27 @@ impl Runtime {
                 message: msg,
             });
         }
-        match mgr.install_bundled_offline(distro, &src) {
+        let token_for_progress = token.clone();
+        let mut progress_cb = |percent: i32, message: String| {
+            let stage = if percent >= 100 { "ready" } else { "extracting" };
+            let state = if percent >= 100 {
+                crate::proto::LinuxEnvState::LinuxEnvReady as i32
+            } else {
+                crate::proto::LinuxEnvState::LinuxEnvInstalling as i32
+            };
+            let _ = self.emit_event_kind(EventKind::LinuxEnvInstallProgress(
+                crate::proto::LinuxEnvInstallProgressEvent {
+                    progress_token: token_for_progress.clone(),
+                    stage: stage.into(),
+                    percent: percent.clamp(0, 100) as u32,
+                    bytes_done: 0,
+                    bytes_total: 0,
+                    message,
+                    state,
+                },
+            ));
+        };
+        match mgr.install_bundled_offline_with_progress(distro, &src, &mut progress_cb) {
             Ok(st) => {
                 let _ = self.emit_event_kind(EventKind::LinuxEnvInstallProgress(
                     crate::proto::LinuxEnvInstallProgressEvent {

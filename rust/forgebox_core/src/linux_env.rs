@@ -92,12 +92,22 @@ impl LinuxEnvManager {
         distro: LinuxDistro,
         source_tar_gz: &Path,
     ) -> Result<LinuxEnvStatus> {
+        self.install_bundled_offline_with_progress(distro, source_tar_gz, &mut |_p, _m| {})
+    }
+
+    pub fn install_bundled_offline_with_progress<F: FnMut(i32, String)>(
+        &self,
+        distro: LinuxDistro,
+        source_tar_gz: &Path,
+        progress: &mut F,
+    ) -> Result<LinuxEnvStatus> {
         if !matches!(distro, LinuxDistro::Alpine) {
             return Err(CoreError::InvalidArgument(
                 "M10.1 bundled offline install supports Alpine only".into(),
             ));
         }
         self.mark_installing(distro, "Extracting bundled Alpine rootfs...")?;
+        progress(5, "Extracting bundled Alpine rootfs...".into());
         let rootfs = self.rootfs_path(distro);
         let staging = self.cache_root.join(format!(
             ".extract-{}-{}",
@@ -108,13 +118,18 @@ impl LinuxEnvManager {
             fs::remove_dir_all(&staging)?;
         }
         fs::create_dir_all(&staging)?;
-        let extract_res = extract_tar_gz_safe(source_tar_gz, &staging);
+        progress(10, "Extracting rootfs archive...".into());
+        let extract_res = extract_tar_gz_safe_with_progress(source_tar_gz, &staging, &mut |done, _total, msg| {
+            let pct = (10 + (done / 50).min(65) as i32).min(75);
+            progress(pct, msg);
+        });
         if let Err(e) = extract_res {
             let _ = fs::remove_dir_all(&staging);
             let msg = format!("Extraction failed: {e}");
             self.mark_failed(distro, &msg)?;
             return Err(CoreError::InvalidArgument(msg));
         }
+        progress(80, "Finalizing rootfs...".into());
         if rootfs.exists() {
             fs::remove_dir_all(&rootfs)?;
         }
@@ -126,6 +141,7 @@ impl LinuxEnvManager {
             let _ = fs::remove_dir_all(&staging);
             Ok::<(), CoreError>(())
         })?;
+        progress(90, "Configuring PRoot wrapper...".into());
         self.ensure_proot_wrapper()?;
         if !self.proot_binary_path().is_file() {
             let msg = "PRoot loader not present in native lib dir".to_string();
@@ -142,6 +158,7 @@ impl LinuxEnvManager {
             distro,
             "Ready (offline bundled Alpine)",
         )?;
+        progress(100, "Ready (offline bundled Alpine)".into());
         Ok(self.status())
     }
 
@@ -382,12 +399,26 @@ pub fn build_package_install_command(manager: &str, spec: &str) -> Result<String
 }
 
 pub fn extract_tar_gz_safe(source: &Path, dest: &Path) -> Result<()> {
+    extract_tar_gz_safe_with_progress(source, dest, &mut |_done, _total, _msg| {})
+}
+
+pub fn extract_tar_gz_safe_with_progress<F: FnMut(u64, u64, String)>(
+    source: &Path,
+    dest: &Path,
+    progress: &mut F,
+) -> Result<()> {
     let file = fs::File::open(source)?;
+    let total = file.metadata().map(|m| m.len()).unwrap_or(0);
     let dec = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(dec);
     fs::create_dir_all(dest)?;
     let dest_canon = fs::canonicalize(dest)?;
+    let mut done_entries: u64 = 0;
     for entry in archive.entries()? {
+        done_entries += 1;
+        if done_entries % 25 == 0 {
+            progress(done_entries, total, format!("Extracting rootfs... ({done_entries} entries)"));
+        }
         let mut entry = entry?;
         let entry_type = entry.header().entry_type();
         let rel = entry.path()?.into_owned();

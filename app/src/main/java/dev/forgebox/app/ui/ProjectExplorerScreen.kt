@@ -56,6 +56,10 @@ fun ProjectExplorerScreen(
     onOpenFileAt: (String, Int, Int) -> Unit = { p, _, _ -> onOpenFile(p) },
 ) {
     val state by viewModel.state.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val editorVm: EditorViewModel = androidx.lifecycle.viewmodel.compose.viewModel(factory = EditorViewModel.factory(viewModel.repository))
+    val editorState by editorVm.state.collectAsState()
+    val terminalState by dev.forgebox.app.terminal.TerminalSessionController.state.collectAsState()
     var showCreateFile by remember { mutableStateOf(false) }
     var showCreateFolder by remember { mutableStateOf(false) }
     var actionTarget by remember { mutableStateOf<FileEntryModel?>(null) }
@@ -65,115 +69,116 @@ fun ProjectExplorerScreen(
     var showNetwork by remember { mutableStateOf(false) }
     var showBuild by remember { mutableStateOf(false) }
     var showOverflow by remember { mutableStateOf(false) }
+    var bottomPanel by remember { mutableStateOf("Files") }
     val clipboard = LocalClipboardManager.current
+    val editorRef = remember { mutableStateOf<io.github.rosemoe.sora.widget.CodeEditor?>(null) }
+    val linuxVm = remember {
+        LinuxEnvViewModel(
+            repository = WorkspaceRepository(ForgeBoxRuntime),
+            runtime = ForgeBoxRuntime,
+            sourcePathProvider = { distro, mode -> prepareLinuxBootstrapSource(context, distro, mode) },
+        )
+    }
+    val linuxState by linuxVm.state.collectAsState()
 
-    LaunchedEffect(projectId) { viewModel.openProject(projectId) }
+    LaunchedEffect(projectId) { viewModel.openProject(projectId); linuxVm.refresh() }
+    LaunchedEffect(terminalState.open, bottomPanel, linuxState.status?.state) {
+        if ((terminalState.open || bottomPanel == "Terminal") && linuxState.status?.state == LinuxEnvUiState.NOT_INSTALLED) {
+            linuxVm.install(LinuxDistroUi.ALPINE, LinuxBootstrapModeUi.BUNDLED_OFFLINE)
+        }
+    }
 
-    Scaffold(
-        floatingActionButton = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                FloatingActionButton(onClick = { showCreateFolder = true }) { Text("D") }
-                FloatingActionButton(onClick = { showCreateFile = true }) { Text("F") }
-            }
-        },
-    ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text("Back") }
-                Spacer(Modifier.width(8.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        projectId,
-                        style = MaterialTheme.typography.titleLarge,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        "Project-relative paths only. Rust VFS validates all operations.",
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+    Scaffold { padding ->
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("<") }
+                val activeTab = editorState.tabs.getOrNull(editorState.activeIndex)
+                Text(
+                    activeTab?.path?.substringAfterLast('/') ?: projectId,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { editorVm.saveActive { if (it.isSuccess) viewModel.refresh() } }, enabled = activeTab != null) { Text("Save") }
                 Box {
                     TextButton(onClick = { showOverflow = true }) { Text("\u22EE") }
-                    androidx.compose.material3.DropdownMenu(
-                        expanded = showOverflow,
-                        onDismissRequest = { showOverflow = false },
-                    ) {
-                        androidx.compose.material3.DropdownMenuItem(
-                            text = { Text("Git") },
-                            onClick = { showOverflow = false; onOpenGit() },
-                        )
-                        androidx.compose.material3.DropdownMenuItem(
-                            text = { Text("Linux") },
-                            onClick = { showOverflow = false; showLinuxEnv = true },
-                        )
-                        androidx.compose.material3.DropdownMenuItem(
-                            text = { Text("Network") },
-                            onClick = { showOverflow = false; showNetwork = true },
-                        )
-                        androidx.compose.material3.DropdownMenuItem(
-                            text = { Text("Build / Run") },
-                            onClick = { showOverflow = false; showBuild = true },
-                        )
-                        androidx.compose.material3.DropdownMenuItem(
-                            text = { Text("Refresh") },
-                            onClick = { showOverflow = false; viewModel.refresh() },
-                        )
+                    androidx.compose.material3.DropdownMenu(expanded = showOverflow, onDismissRequest = { showOverflow = false }) {
+                        androidx.compose.material3.DropdownMenuItem(text = { Text("Git") }, onClick = { showOverflow = false; onOpenGit() })
+                        androidx.compose.material3.DropdownMenuItem(text = { Text("Linux") }, onClick = { showOverflow = false; showLinuxEnv = true })
+                        androidx.compose.material3.DropdownMenuItem(text = { Text("Network") }, onClick = { showOverflow = false; showNetwork = true })
+                        androidx.compose.material3.DropdownMenuItem(text = { Text("Build / Run") }, onClick = { showOverflow = false; showBuild = true })
+                        androidx.compose.material3.DropdownMenuItem(text = { Text("Refresh files") }, onClick = { showOverflow = false; viewModel.refresh() })
                     }
                 }
             }
 
-            state.actionError?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            }
+            editorState.actionError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 8.dp)) }
 
-            when {
-                state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-                state.error != null -> ErrorBlock(state.error!!, onRetry = viewModel::refresh)
-                else -> {
-                    if (state.entries.isEmpty()) {
-                        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            Text("Empty project. Use F for file or D for folder.")
-                        }
-                    } else {
-                        LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            items(state.entries, key = { it.path }) { entry ->
-                                val indent = (entry.path.count { it == '/' } * 12).dp
-                                Card(
-                                    modifier = Modifier.fillMaxWidth().padding(start = indent)
-                                        .combinedClickable(
-                                            onClick = { if (!entry.isDir) onOpenFile(entry.path) },
-                                            onLongClick = { actionTarget = entry },
-                                        ),
-                                ) {
-                                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Text(if (entry.isDir) "[dir]" else "[file]", style = MaterialTheme.typography.labelSmall)
-                                        Spacer(Modifier.width(8.dp))
-                                        Column(Modifier.weight(1f)) {
-                                            Text(entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            Text(entry.path, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        }
-                                        if (!entry.isDir) Text("${entry.size}B", style = MaterialTheme.typography.labelSmall)
-                                    }
-                                }
-                            }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                val tab = editorState.tabs.getOrNull(editorState.activeIndex)
+                when {
+                    tab == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Open a file from Files") }
+                    tab.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                    tab.error != null -> Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(tab.error ?: "Error", color = MaterialTheme.colorScheme.error)
+                            Spacer(Modifier.height(8.dp))
+                            Button(onClick = { editorVm.reloadActive() }) { Text("Reload") }
                         }
                     }
+                    else -> SoraEditorView(
+                        text = tab.content,
+                        path = tab.path,
+                        readOnly = tab.readOnly || tab.tooLarge,
+                        onTextChanged = { editorVm.onContentChanged(editorState.activeIndex, it) },
+                        editorRef = editorRef,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
 
-                    state.selectedPath?.let { selected ->
-                        Spacer(Modifier.height(8.dp))
-                        Text("Preview: $selected", style = MaterialTheme.typography.titleSmall)
-                        Card(Modifier.fillMaxWidth().height(180.dp)) {
-                            Box(Modifier.fillMaxSize().padding(12.dp)) {
-                                when {
-                                    state.previewError != null -> Text(state.previewError!!, color = MaterialTheme.colorScheme.error)
-                                    state.previewText != null -> LazyColumn { item { Text(state.previewText!!) } }
-                                    else -> CircularProgressIndicator(Modifier.align(Alignment.Center))
-                                }
-                            }
-                        }
+            androidx.compose.material3.HorizontalDivider()
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("Files", "Terminal", "Output").forEach { name ->
+                    TextButton(onClick = {
+                        bottomPanel = if (bottomPanel == name) "" else name
+                        if (name == "Terminal" && bottomPanel == "Terminal") dev.forgebox.app.terminal.TerminalSessionController.open(context, projectId)
+                    }) { Text(if (bottomPanel == name) "[$name]" else name) }
+                }
+            }
+
+            if (bottomPanel.isNotBlank()) {
+                androidx.compose.material3.HorizontalDivider()
+                Box(Modifier.fillMaxWidth().height(280.dp)) {
+                    when (bottomPanel) {
+                        "Files" -> WorkspaceFilesPanel(
+                            state = state,
+                            onRefresh = viewModel::refresh,
+                            onCreateFile = { showCreateFile = true },
+                            onCreateFolder = { showCreateFolder = true },
+                            onOpenFile = { path -> editorVm.openFile(projectId, path); bottomPanel = "" },
+                            onAction = { actionTarget = it },
+                        )
+                        "Terminal" -> dev.forgebox.app.terminal.TerminalPanel(
+                            state = terminalState,
+                            onCreate = { dev.forgebox.app.terminal.TerminalSessionController.createSession(projectId) },
+                            onSelect = dev.forgebox.app.terminal.TerminalSessionController::select,
+                            onRename = dev.forgebox.app.terminal.TerminalSessionController::rename,
+                            onWrite = dev.forgebox.app.terminal.TerminalSessionController::write,
+                            onWriteBytes = dev.forgebox.app.terminal.TerminalSessionController::writeBytes,
+                            onSignal = dev.forgebox.app.terminal.TerminalSessionController::signal,
+                            onStop = dev.forgebox.app.terminal.TerminalSessionController::stop,
+                            onStopAll = dev.forgebox.app.terminal.TerminalSessionController::stopAll,
+                            onCloseSession = dev.forgebox.app.terminal.TerminalSessionController::closeSession,
+                            onRecreate = dev.forgebox.app.terminal.TerminalSessionController::recreateRestorable,
+                            onDismissRestore = dev.forgebox.app.terminal.TerminalSessionController::dismissRestoreBanner,
+                            onApproveApproval = dev.forgebox.app.terminal.TerminalSessionController::approvePending,
+                            onDenyApproval = dev.forgebox.app.terminal.TerminalSessionController::denyPending,
+                            onShellKindChange = dev.forgebox.app.terminal.TerminalSessionController::setPreferredShellKind,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        "Output" -> WorkspaceOutputPanel(projectId = projectId, repository = viewModel.repository, onOpenDiagnostic = { p, l, c -> editorVm.openFileAt(projectId, p, l, c); bottomPanel = "" })
                     }
                 }
             }
@@ -181,29 +186,22 @@ fun ProjectExplorerScreen(
     }
 
     if (showCreateFile) NameDialog("Create file", "Create", "", { showCreateFile = false }) { path ->
-        viewModel.createFile(path) { if (it.isSuccess) showCreateFile = false }
+        viewModel.createFile(path) { res -> if (res.isSuccess) { showCreateFile = false; viewModel.refresh(); editorVm.openFile(projectId, path.trim().removePrefix("/")) } }
     }
     if (showCreateFolder) NameDialog("Create folder", "Create", "", { showCreateFolder = false }) { path ->
-        viewModel.createFolder(path) { if (it.isSuccess) showCreateFolder = false }
+        viewModel.createFolder(path) { if (it.isSuccess) { showCreateFolder = false; viewModel.refresh() } }
     }
 
     actionTarget?.let { entry ->
         AlertDialog(
             onDismissRequest = { actionTarget = null },
-            title = { Text(entry.path) },
+            title = { Text(entry.path, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             text = {
                 Column {
-                    TextButton(onClick = {
-                        clipboard.setText(AnnotatedString(entry.path))
-                        actionTarget = null
-                    }) { Text("Copy path") }
-                    if (!entry.isDir) {
-                        TextButton(onClick = { onOpenFile(entry.path); actionTarget = null }) { Text("Open in editor") }
-                    }
+                    TextButton(onClick = { clipboard.setText(AnnotatedString(entry.path)); actionTarget = null }) { Text("Copy path") }
+                    if (!entry.isDir) TextButton(onClick = { editorVm.openFile(projectId, entry.path); bottomPanel = ""; actionTarget = null }) { Text("Open in editor") }
                     TextButton(onClick = { renameTarget = entry; actionTarget = null }) { Text("Rename") }
-                    TextButton(onClick = { deleteTarget = entry; actionTarget = null }) {
-                        Text("Delete", color = MaterialTheme.colorScheme.error)
-                    }
+                    TextButton(onClick = { deleteTarget = entry; actionTarget = null }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
                 }
             },
             confirmButton = {},
@@ -213,7 +211,7 @@ fun ProjectExplorerScreen(
 
     renameTarget?.let { entry ->
         NameDialog("Rename", "Rename", entry.path, { renameTarget = null }) { newPath ->
-            viewModel.rename(entry.path, newPath) { if (it.isSuccess) renameTarget = null }
+            viewModel.rename(entry.path, newPath) { if (it.isSuccess) { renameTarget = null; viewModel.refresh() } }
         }
     }
 
@@ -221,51 +219,69 @@ fun ProjectExplorerScreen(
         val recursive = entry.isDir
         ConfirmDialog(
             title = "Delete path?",
-            body = buildString {
-                append("Delete \"${entry.path}\"?")
-                if (recursive) append(" This is a recursive folder delete.")
-                append(" M13 will add checkpoints before destructive actions.")
-            },
+            body = "Delete \"${entry.path}\"?" + if (recursive) " This is a recursive folder delete." else "",
             confirmLabel = if (recursive) "Recursive delete" else "Delete",
             onDismiss = { deleteTarget = null },
-            onConfirm = {
-                viewModel.deletePath(entry.path, recursive) { if (it.isSuccess) deleteTarget = null }
-            },
+            onConfirm = { viewModel.deletePath(entry.path, recursive) { if (it.isSuccess) { deleteTarget = null; viewModel.refresh() } } },
         )
     }
 
-
-    if (showLinuxEnv) {
-        val context = androidx.compose.ui.platform.LocalContext.current
-        val linuxVm = remember {
-            LinuxEnvViewModel(
-                repository = WorkspaceRepository(ForgeBoxRuntime),
-                runtime = ForgeBoxRuntime,
-                sourcePathProvider = { distro, mode -> prepareLinuxBootstrapSource(context, distro, mode) },
-            )
-        }
-        LinuxEnvDialog(viewModel = linuxVm, projectId = projectId, onDismiss = { showLinuxEnv = false })
-    }
+    if (showLinuxEnv) { LinuxEnvDialog(viewModel = linuxVm, projectId = projectId, onDismiss = { showLinuxEnv = false }) }
     if (showNetwork) {
         val netVm = remember { NetworkViewModel(NetworkBroker(WorkspaceRepository(ForgeBoxRuntime))) }
-        AlertDialog(
-            onDismissRequest = { showNetwork = false },
-            title = { Text("Network") },
-            text = { Box(Modifier.fillMaxWidth().height(520.dp)) { NetworkScreen(netVm, sessionId = projectId) } },
-            confirmButton = { TextButton(onClick = { showNetwork = false }) { Text("Close") } },
-        )
+        AlertDialog(onDismissRequest = { showNetwork = false }, title = { Text("Network") }, text = { Box(Modifier.fillMaxWidth().height(520.dp)) { NetworkScreen(netVm, sessionId = projectId) } }, confirmButton = { TextButton(onClick = { showNetwork = false }) { Text("Close") } })
     }
     if (showBuild) {
-        AlertDialog(
-            onDismissRequest = { showBuild = false },
-            title = { Text("Build / Run") },
-            text = { BuildDialogContent(projectId = projectId, repository = viewModel.repository, onOpenDiagnostic = { pth: String, l: Int, c: Int -> onOpenFileAt(pth, l, c); showBuild = false }) },
-            confirmButton = { TextButton(onClick = { showBuild = false }) { Text("Close") } },
-        )
+        AlertDialog(onDismissRequest = { showBuild = false }, title = { Text("Build / Run") }, text = { BuildDialogContent(projectId = projectId, repository = viewModel.repository, onOpenDiagnostic = { pth: String, l: Int, c: Int -> editorVm.openFileAt(projectId, pth, l, c); showBuild = false }) }, confirmButton = { TextButton(onClick = { showBuild = false }) { Text("Close") } })
     }
 }
 
-private fun prepareLinuxBootstrapSource(context: android.content.Context, distro: LinuxDistroUi, mode: LinuxBootstrapModeUi): Result<String> = runCatching {
+
+@Composable
+private fun WorkspaceFilesPanel(
+    state: ProjectExplorerUiState,
+    onRefresh: () -> Unit,
+    onCreateFile: () -> Unit,
+    onCreateFolder: () -> Unit,
+    onOpenFile: (String) -> Unit,
+    onAction: (FileEntryModel) -> Unit,
+) {
+    Column(Modifier.fillMaxSize().padding(8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onCreateFile) { Text("New file") }
+                TextButton(onClick = onCreateFolder) { Text("New folder") }
+            }
+            TextButton(onClick = onRefresh) { Text("Refresh") }
+        }
+        state.actionError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        when {
+            state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            state.error != null -> Text(state.error ?: "Error", color = MaterialTheme.colorScheme.error)
+            state.entries.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Empty project") }
+            else -> LazyColumn(Modifier.fillMaxSize()) {
+                items(state.entries, key = { it.path }) { entry ->
+                    val indent = (entry.path.count { it == '/' } * 12).dp
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = indent, top = 6.dp, bottom = 6.dp)
+                            .combinedClickable(onClick = { if (!entry.isDir) onOpenFile(entry.path) }, onLongClick = { onAction(entry) }),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(if (entry.isDir) "[dir]" else "[file]", style = MaterialTheme.typography.labelSmall)
+                        Spacer(Modifier.width(8.dp))
+                        Text(entry.path, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkspaceOutputPanel(projectId: String, repository: WorkspaceRepository, onOpenDiagnostic: (String, Int, Int) -> Unit) {
+    BuildDialogContent(projectId = projectId, repository = repository, onOpenDiagnostic = onOpenDiagnostic)
+}
+internal fun prepareLinuxBootstrapSource(context: android.content.Context, distro: LinuxDistroUi, mode: LinuxBootstrapModeUi): Result<String> = runCatching {
     if (distro != LinuxDistroUi.ALPINE) error("Only Alpine bootstrap is supported in this build.")
     val arch = when (android.os.Build.SUPPORTED_ABIS.firstOrNull().orEmpty()) {
         "arm64-v8a", "aarch64" -> "aarch64"
@@ -273,12 +289,14 @@ private fun prepareLinuxBootstrapSource(context: android.content.Context, distro
         else -> error("Unsupported ABI for Alpine rootfs: ${android.os.Build.SUPPORTED_ABIS.joinToString()}")
     }
     val fileName = "alpine-minirootfs-3.20.7-$arch.tar.gz"
-    val outDir = java.io.File(context.filesDir, "ForgeBox/Cache/linux/bootstrap")
-    if (!outDir.exists()) outDir.mkdirs()
+    val outDir = java.io.File(context.cacheDir, "forgebox-linux-bootstrap").apply { mkdirs() }
     val outFile = java.io.File(outDir, fileName)
     if (mode == LinuxBootstrapModeUi.BUNDLED_OFFLINE) {
         val assetName = "linux/$fileName"
-        context.assets.open(assetName).use { input -> outFile.outputStream().use { output -> input.copyTo(output) } }
+        context.assets.open(assetName).use { input ->
+            outFile.outputStream().use { output -> input.copyTo(output) }
+        }
+        if (!outFile.exists() || outFile.length() <= 0L) error("Failed to stage bundled rootfs: ${outFile.absolutePath}")
         return@runCatching outFile.absolutePath
     }
     // NETWORK_DOWNLOAD: fetch through M11 broker (policy/consent/allowlist) on the app side.
@@ -355,3 +373,4 @@ private fun LinuxEnvDialog(viewModel: LinuxEnvViewModel, projectId: String, onDi
     )
 
 }
+

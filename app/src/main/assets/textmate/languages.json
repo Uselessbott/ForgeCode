@@ -1,0 +1,10 @@
+﻿[
+  {"name":"python","scopeName":"source.python","grammar":"textmate/languages/python.tmLanguage.json","languageConfiguration":"textmate/languages/python.language-configuration.json"},
+  {"name":"javascript","scopeName":"source.js","grammar":"textmate/languages/javascript.tmLanguage.json","languageConfiguration":"textmate/languages/javascript.language-configuration.json"},
+  {"name":"json","scopeName":"source.json","grammar":"textmate/languages/json.tmLanguage.json","languageConfiguration":"textmate/languages/json.language-configuration.json"},
+  {"name":"markdown","scopeName":"text.markdown","grammar":"textmate/languages/markdown.tmLanguage.json","languageConfiguration":"textmate/languages/markdown.language-configuration.json"},
+  {"name":"java","scopeName":"source.java","grammar":"textmate/languages/java.tmLanguage.json","languageConfiguration":"textmate/languages/java.language-configuration.json"},
+  {"name":"kotlin","scopeName":"source.kotlin","grammar":"textmate/languages/kotlin.tmLanguage.json","languageConfiguration":"textmate/languages/kotlin.language-configuration.json"},
+  {"name":"rust","scopeName":"source.rust","grammar":"textmate/languages/rust.tmLanguage.json","languageConfiguration":"textmate/languages/rust.language-configuration.json"},
+  {"name":"cpp","scopeName":"source.cpp","grammar":"textmate/languages/cpp.tmLanguage.json","languageConfiguration":"textmate/languages/cpp.language-configuration.json"}
+]

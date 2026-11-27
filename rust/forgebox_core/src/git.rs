@@ -231,7 +231,7 @@ pub fn commit(
     let mut index = repo
         .index()
         .map_err(|e| CoreError::InvalidArgument(format!("git index: {e}")))?;
-    if index.is_empty() {
+    if index.is_empty() && repo.head().is_err() {
         return Err(CoreError::InvalidArgument("no staged changes".into()));
     }
     let tree_id = index
@@ -240,29 +240,36 @@ pub fn commit(
     let tree = repo
         .find_tree(tree_id)
         .map_err(|e| CoreError::InvalidArgument(format!("git tree: {e}")))?;
-    let sig = Signature::now(
-        if author_name.is_empty() {
-            "ForgeBox"
-        } else {
-            author_name
-        },
-        if author_email.is_empty() {
-            "forgebox@local"
-        } else {
-            author_email
-        },
-    )
-    .map_err(|e| CoreError::InvalidArgument(format!("git sig: {e}")))?;
+    let sig_name = if author_name.trim().is_empty() { "ForgeBox" } else { author_name.trim() };
+    let sig_email = if author_email.trim().is_empty() { "forgebox@local" } else { author_email.trim() };
+    let sig = Signature::now(sig_name, sig_email)
+        .map_err(|e| CoreError::InvalidArgument(format!("git signature: {e}")))?;
     let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
-    let parents: Vec<&git2::Commit> = parent.iter().collect();
     if let Some(p) = parent.as_ref() {
         if p.tree_id() == tree_id {
             return Err(CoreError::InvalidArgument("no staged changes".into()));
         }
     }
+    let parents: Vec<&git2::Commit> = parent.iter().collect();
+    let update_ref = match repo.head() {
+        Ok(head) if head.is_branch() => Some(head.name().unwrap_or("HEAD").to_string()),
+        _ => Some("HEAD".to_string()),
+    };
     let oid = repo
-        .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
+        .commit(update_ref.as_deref(), &sig, &sig, message, &tree, &parents)
         .map_err(|e| CoreError::InvalidArgument(format!("git commit: {e}")))?;
+    if repo.head().ok().and_then(|h| h.target()).as_ref() != Some(&oid) {
+        // Ensure HEAD resolves to the new commit (unborn HEAD / initial commit case).
+        let head_ref = repo.head().ok();
+        let target_ref = head_ref
+            .as_ref()
+            .and_then(|h| h.name())
+            .unwrap_or("refs/heads/master");
+        repo.reference(target_ref, oid, true, "forgebox commit")
+            .map_err(|e| CoreError::InvalidArgument(format!("git commit ref update: {e}")))?;
+        repo.set_head(target_ref)
+            .map_err(|e| CoreError::InvalidArgument(format!("git commit set head: {e}")))?;
+    }
     Ok(oid.to_string())
 }
 

@@ -43,15 +43,11 @@ fun ForgeBoxApp() {
                         .setGetInfo(ForgeProto.GetInfoRequest.getDefaultInstance())
                         .build(),
                 )
-                if (response.status == ForgeProto.Status.OK && response.hasGetInfo()) {
-                    val info = response.getInfo
-                    "Core ${info.version} | ${info.projectCount} projects"
-                } else {
-                    "Core error: ${response.error.code} ${response.error.message}"
-                }
+                if (response.status == ForgeProto.Status.OK && response.hasGetInfo()) "ready"
+                else "Core error: ${response.error.code} ${response.error.message}"
             }.getOrElse { "Core init failed: ${it.message}" }
         }
-        ready = coreStatus.startsWith("Core ")
+        ready = coreStatus == "ready" || coreStatus.startsWith("Core ")
     }
 
     ForgeBoxTheme(mode = themeMode) {
@@ -76,7 +72,7 @@ fun ForgeBoxApp() {
             val vm: ProjectListViewModel = viewModel(factory = ProjectListViewModel.factory(repository))
             ProjectListScreen(
                 viewModel = vm,
-                coreStatus = coreStatus,
+                coreStatus = "",
                 themeMode = themeMode,
                 onThemeModeChange = { mode -> themeMode = mode; themePref.setMode(mode) },
                 onOpenProject = { selectedProjectId = it },
@@ -84,28 +80,14 @@ fun ForgeBoxApp() {
         } else if (openGit) {
             val vm: GitViewModel = viewModel(factory = GitViewModel.factory(repository, credentialBroker))
             GitScreen(projectId = projectId, viewModel = vm, onBack = { openGit = false })
-        } else if (openFilePath != null) {
-            val vm: EditorViewModel = viewModel(factory = EditorViewModel.factory(repository))
-            val parts = openFilePath!!.split("|", limit = 3)
-            val path = parts[0]
-            val line = parts.getOrNull(1)?.toIntOrNull() ?: 1
-            val col = parts.getOrNull(2)?.toIntOrNull() ?: 1
-            EditorScreen(
-                projectId = projectId,
-                initialPath = path,
-                initialLine = line,
-                initialColumn = col,
-                viewModel = vm,
-                onBack = { openFilePath = null },
-            )
         } else {
             val vm: ProjectExplorerViewModel = viewModel(factory = ProjectExplorerViewModel.factory(repository))
             ProjectExplorerScreen(
                 projectId = projectId,
                 viewModel = vm,
                 onBack = { selectedProjectId = null },
-                onOpenFile = { openFilePath = it },
-                onOpenFileAt = { pth, l, c -> openFilePath = "$pth|$l|$c" },
+                onOpenFile = { },
+                onOpenFileAt = { _, _, _ -> },
                 onOpenGit = { openGit = true },
             )
         }

@@ -46,7 +46,16 @@ import dev.forgebox.app.terminal.TerminalPanel
 import dev.forgebox.app.terminal.TerminalSessionController
 import dev.forgebox.app.terminal.TerminalSessionLifecycle
 import io.github.rosemoe.sora.event.ContentChangeEvent
+import io.github.rosemoe.sora.lang.EmptyLanguage
+import io.github.rosemoe.sora.langs.textmate.TextMateColorScheme
+import io.github.rosemoe.sora.langs.textmate.TextMateLanguage
+import io.github.rosemoe.sora.langs.textmate.registry.FileProviderRegistry
+import io.github.rosemoe.sora.langs.textmate.registry.GrammarRegistry
+import io.github.rosemoe.sora.langs.textmate.registry.ThemeRegistry
+import io.github.rosemoe.sora.langs.textmate.registry.model.ThemeModel
+import io.github.rosemoe.sora.langs.textmate.registry.provider.AssetsFileResolver
 import io.github.rosemoe.sora.widget.CodeEditor
+import org.eclipse.tm4e.core.registry.IThemeSource
 import kotlinx.coroutines.delay
 
 @Composable
@@ -140,6 +149,7 @@ fun EditorScreen(
                         }
                         SoraEditorView(
                             text = tab.content,
+                            path = tab.path,
                             readOnly = tab.readOnly,
                             onTextChanged = { viewModel.onContentChanged(state.activeIndex, it) },
                             editorRef = editorRef,
@@ -253,9 +263,54 @@ fun EditorScreen(
     }
 }
 
+internal object EditorTextMate {
+    @Volatile private var initialized = false
+    private val lock = Any()
+
+    fun ensureInitialized(context: android.content.Context) {
+        if (initialized) return
+        synchronized(lock) {
+            if (initialized) return
+            runCatching {
+                FileProviderRegistry.getInstance().addFileProvider(AssetsFileResolver(context.applicationContext.assets))
+                val themePath = "textmate/themes/darcula.json"
+                val themeRegistry = ThemeRegistry.getInstance()
+                themeRegistry.loadTheme(ThemeModel(IThemeSource.fromInputStream(context.applicationContext.assets.open(themePath), themePath, null), "darcula").apply { isDark = true })
+                themeRegistry.setTheme("darcula")
+                GrammarRegistry.getInstance().loadGrammars("textmate/languages.json")
+                initialized = true
+            }
+        }
+    }
+
+    fun languageForPath(context: android.content.Context, path: String?): io.github.rosemoe.sora.lang.Language {
+        ensureInitialized(context)
+        val ext = path?.substringAfterLast('.', "")?.lowercase().orEmpty()
+        val scope = when (ext) {
+            "py" -> "source.python"
+            "js", "jsx", "mjs", "cjs" -> "source.js"
+            "json" -> "source.json"
+            "md", "markdown" -> "text.markdown"
+            "java" -> "source.java"
+            "kt", "kts" -> "source.kotlin"
+            "rs" -> "source.rust"
+            "c", "cc", "cpp", "cxx", "h", "hpp" -> "source.cpp"
+            else -> null
+        } ?: return EmptyLanguage()
+        return runCatching {
+            TextMateLanguage.create(scope, true).also { it.isAutoCompleteEnabled = false }
+        }.getOrElse { EmptyLanguage() }
+    }
+
+    fun applyTheme(editor: CodeEditor) {
+        runCatching { editor.colorScheme = TextMateColorScheme.create(ThemeRegistry.getInstance()) }
+    }
+}
+
 @Composable
-private fun SoraEditorView(
+internal fun SoraEditorView(
     text: String,
+    path: String?,
     readOnly: Boolean,
     onTextChanged: (String) -> Unit,
     editorRef: androidx.compose.runtime.MutableState<CodeEditor?>,
@@ -273,6 +328,10 @@ private fun SoraEditorView(
         editorRef.value = editor
         val sub = editor.subscribeEvent(ContentChangeEvent::class.java) { _, _ -> onTextChanged(editor.text.toString()) }
         onDispose { sub.unsubscribe() }
+    }
+    LaunchedEffect(path) {
+        EditorTextMate.applyTheme(editor)
+        editor.setEditorLanguage(EditorTextMate.languageForPath(context, path))
     }
     LaunchedEffect(text, readOnly) {
         if (editor.text.toString() != text) editor.setText(text)
